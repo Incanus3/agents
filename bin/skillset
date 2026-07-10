@@ -9,6 +9,7 @@ import re
 import shutil
 import stat
 import sys
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -65,7 +66,7 @@ def set_path(root, name):
     return path
 
 
-def validate_lockfile(path):
+def read_lockfile(path):
     if not real_kind(path, stat.S_ISREG):
         raise OperationalError(f"lockfile must be a real regular file: {path}")
     try:
@@ -82,6 +83,11 @@ def validate_lockfile(path):
     )
     if not valid:
         raise OperationalError(f"lockfile is not a version-3 global lockfile: {path}")
+    return value
+
+
+def validate_lockfile(path):
+    read_lockfile(path)
 
 
 def validate_set(root, name):
@@ -135,6 +141,26 @@ def validate_layout(root):
 
 
 @contextmanager
+def stable_home_lock(root):
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(root.parent, flags)
+    except OSError as error:
+        raise OperationalError(
+            f"HOME must be an existing real directory: {root.parent}: {error}"
+        ) from error
+    locked = False
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        locked = True
+        yield descriptor
+    finally:
+        if locked:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+@contextmanager
 def operation_lock(root, create=True):
     if lexists(root) and not real_kind(root, stat.S_ISDIR):
         raise OperationalError(f"managed root must be a real directory: {root}")
@@ -154,6 +180,53 @@ def operation_lock(root, create=True):
             yield lock_file
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+@contextmanager
+def doctor_operation_lock(root, errors):
+    lock_path = root / ".skillset.lock"
+    try:
+        metadata = lock_path.lstat()
+    except FileNotFoundError:
+        errors.append(f"advisory lock is missing: {lock_path}")
+        yield None
+        return
+    except OSError as error:
+        errors.append(f"could not inspect advisory lock {lock_path}: {error}")
+        yield None
+        return
+    if stat.S_ISLNK(metadata.st_mode):
+        errors.append(f"advisory lock symlink is not allowed: {lock_path}")
+        yield None
+        return
+    if not stat.S_ISREG(metadata.st_mode):
+        errors.append(f"advisory lock must be a real regular file: {lock_path}")
+        yield None
+        return
+
+    try:
+        descriptor = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as error:
+        errors.append(f"could not open advisory lock {lock_path}: {error}")
+        yield None
+        return
+    locked = False
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (
+            opened.st_dev,
+            opened.st_ino,
+        ) != (metadata.st_dev, metadata.st_ino):
+            errors.append(f"advisory lock changed during inspection: {lock_path}")
+            yield None
+            return
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        locked = True
+        yield descriptor
+    finally:
+        if locked:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def write_empty_lock(path):
@@ -255,7 +328,8 @@ def init(root, name):
                 f"initialization failed ({error}); rollback was incomplete ({details}). "
                 f"Inspect original paths {root / 'skills'} and "
                 f"{root / '.skill-lock.json'} plus staged set {target}; "
-                "restore any missing original from its staged counterpart."
+                "preserve the only remaining copy of any data, run `skillset doctor`, "
+                "and restore any missing original only from its staged counterpart."
             ) from error
         if isinstance(error, KeyboardInterrupt):
             raise
@@ -356,7 +430,7 @@ def incomplete_active_rename(error, old, new, active, problems):
         f"active rename failed ({error}); recovery could not restore a valid "
         f"layout ({details}). Remaining set data is at {location}. Preserve it; "
         f"inspect {old}, {new}, and {active} before moving the set back or "
-        "retargeting active, then run `skillset doctor` when available."
+        "retargeting active, then run `skillset doctor`."
     ) from error
 
 
@@ -682,7 +756,7 @@ def list_sets(root, verbose):
         if verbose:
             skills = inspect_skills(set_path(root, name) / "skills")
             declared = sorted(
-                name
+                printable_text(name)
                 for _directory, name, _description, reason in skills
                 if reason is None
             )
@@ -700,14 +774,250 @@ def show(root, name):
     lines = []
     for directory, declared, description, reason in inspect_skills(skills):
         if reason is None:
-            lines.append(f"{declared} — {description}")
+            lines.append(
+                f"{printable_text(declared)} — {printable_text(description)}"
+            )
         else:
-            lines.append(f"{directory} — [invalid: {reason}]")
+            lines.append(f"{printable_text(directory)} — [invalid: {reason}]")
     for line in sorted(lines):
         print(line)
 
 
-def delegate_skills(root, arguments, lock_file, command_parser):
+def doctor_alias(path, target, errors):
+    if not lexists(path):
+        errors.append(f"managed alias is missing: {path}")
+        return
+    if not path.is_symlink():
+        errors.append(f"managed alias must be a symlink: {path} -> {target}")
+        return
+    try:
+        actual = os.readlink(path)
+    except OSError as error:
+        errors.append(f"could not read managed alias {path}: {error}")
+        return
+    if actual != target:
+        errors.append(
+            f"managed alias is noncanonical: {path} -> {actual}; expected {target}"
+        )
+
+
+def doctor_lockfile(path, errors):
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        errors.append(f"lockfile is missing: {path}")
+        return None
+    except OSError as error:
+        errors.append(f"could not inspect lockfile {path}: {error}")
+        return None
+    if stat.S_ISLNK(mode):
+        errors.append(f"lockfile symlink is not allowed: {path}")
+        return None
+    if not stat.S_ISREG(mode):
+        errors.append(f"lockfile must be a real regular file: {path}")
+        return None
+    try:
+        return read_lockfile(path)
+    except OperationalError as error:
+        errors.append(str(error))
+        return None
+    except Exception as error:
+        errors.append(f"could not read lockfile {path}: {error}")
+        return None
+
+
+def doctor_skills(skills, set_name, errors):
+    installed = set()
+    try:
+        candidates = sorted(skills.iterdir(), key=lambda path: path.name)
+    except OSError as error:
+        errors.append(f"could not inspect skills directory {skills}: {error}")
+        return None
+    for candidate in candidates:
+        try:
+            mode = candidate.lstat().st_mode
+        except OSError as error:
+            errors.append(f"could not inspect skill {candidate}: {error}")
+            continue
+        if stat.S_ISREG(mode):
+            continue
+        if stat.S_ISLNK(mode):
+            errors.append(
+                f"skill directory symlink is not allowed in {set_name!r}: {candidate}"
+            )
+            continue
+        if not stat.S_ISDIR(mode):
+            errors.append(f"unsupported skill entry type in {set_name!r}: {candidate}")
+            continue
+        installed.add(candidate.name)
+        try:
+            text, reason = read_skill_text(candidate)
+            if reason is None:
+                _metadata, reason = parse_frontmatter(text)
+        except Exception as error:
+            errors.append(f"could not inspect skill metadata {candidate}: {error}")
+            continue
+        if reason is not None:
+            errors.append(f"invalid skill metadata in {set_name!r}/{candidate.name}: {reason}")
+    return installed
+
+
+def doctor_set(path, name, errors, warnings):
+    try:
+        mode = path.lstat().st_mode
+    except OSError as error:
+        errors.append(f"could not inspect skillset {name!r} at {path}: {error}")
+        return
+    if stat.S_ISLNK(mode):
+        errors.append(f"skillset directory symlink is not allowed: {path}")
+        return
+    if not stat.S_ISDIR(mode):
+        errors.append(f"skillset must be a real directory: {path}")
+        return
+
+    skills = path / "skills"
+    installed = None
+    try:
+        skills_mode = skills.lstat().st_mode
+    except FileNotFoundError:
+        errors.append(f"skills directory is missing: {skills}")
+    except OSError as error:
+        errors.append(f"could not inspect skills directory {skills}: {error}")
+    else:
+        if stat.S_ISLNK(skills_mode):
+            errors.append(f"skills directory symlink is not allowed: {skills}")
+        elif not stat.S_ISDIR(skills_mode):
+            errors.append(f"skills must be a real directory: {skills}")
+        else:
+            installed = doctor_skills(skills, name, errors)
+
+    lock = doctor_lockfile(path / ".skill-lock.json", errors)
+    if installed is None or lock is None:
+        return
+    locked = set(lock["skills"])
+    for skill_name in sorted(installed - locked):
+        warnings.append(
+            f"installed skill directory {skill_name!r} in {name!r} is missing from the lockfile"
+        )
+    for skill_name in sorted(locked - installed):
+        warnings.append(
+            f"lockfile skill {skill_name!r} in {name!r} has no real direct skill directory"
+        )
+
+
+def printable_text(value):
+    displayed = []
+    for character in str(value):
+        codepoint = ord(character)
+        if unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}:
+            if codepoint <= 0xFF:
+                displayed.append(f"\\x{codepoint:02x}")
+            elif codepoint <= 0xFFFF:
+                displayed.append(f"\\u{codepoint:04x}")
+            else:
+                displayed.append(f"\\U{codepoint:08x}")
+        else:
+            displayed.append(character)
+    return "".join(displayed).encode(
+        "utf-8", "backslashreplace"
+    ).decode("utf-8")
+
+
+def doctor_inspection(root, errors, warnings):
+    skillsets = root / "skillsets"
+
+    skillsets_valid = False
+    try:
+        skillsets_mode = skillsets.lstat().st_mode
+    except FileNotFoundError:
+        errors.append(f"skillsets directory is missing: {skillsets}")
+    except OSError as error:
+        errors.append(f"could not inspect skillsets directory {skillsets}: {error}")
+    else:
+        if stat.S_ISLNK(skillsets_mode):
+            errors.append(f"skillsets directory symlink is not allowed: {skillsets}")
+        elif not stat.S_ISDIR(skillsets_mode):
+            errors.append(f"skillsets must be a real directory: {skillsets}")
+        else:
+            skillsets_valid = True
+
+    doctor_alias(root / "skills", "active/skills", errors)
+    doctor_alias(root / ".skill-lock.json", "active/.skill-lock.json", errors)
+
+    active = root / "active"
+    if not lexists(active):
+        errors.append(f"managed active alias is missing: {active}")
+    elif not active.is_symlink():
+        errors.append(f"managed active alias must be a symlink: {active}")
+    else:
+        try:
+            target = os.readlink(active)
+        except OSError as error:
+            errors.append(f"could not read managed active alias {active}: {error}")
+        else:
+            prefix = "skillsets/"
+            candidate = target[len(prefix) :] if target.startswith(prefix) else ""
+            if not NAME_PATTERN.fullmatch(candidate) or target != prefix + candidate:
+                errors.append(
+                    f"active alias has a noncanonical target; expected skillsets/NAME: {target}"
+                )
+            elif skillsets_valid and not lexists(skillsets / candidate):
+                errors.append(f"active target is missing: {active} -> {target}")
+
+    use_staging = root / ".skillset-use.staging"
+    if lexists(use_staging):
+        errors.append(f"stale active staging path must be recovered: {use_staging}")
+
+    if skillsets_valid:
+        try:
+            entries = sorted(skillsets.iterdir(), key=lambda path: path.name)
+        except OSError as error:
+            errors.append(f"could not inspect skillsets directory {skillsets}: {error}")
+        else:
+            for entry in entries:
+                if entry.name.startswith(".skillset-create-") and entry.name.endswith(
+                    ".staging"
+                ):
+                    errors.append(
+                        f"stale create staging path must be recovered: {entry}"
+                    )
+                    continue
+                if not NAME_PATTERN.fullmatch(entry.name):
+                    errors.append(
+                        f"invalid skillset name {entry.name!r} at {entry}; "
+                        "use lowercase letters, digits, '_' or '-'"
+                    )
+                doctor_set(entry, entry.name, errors, warnings)
+
+
+def doctor(root):
+    errors = []
+    warnings = []
+    try:
+        root_mode = root.lstat().st_mode
+    except FileNotFoundError:
+        root_mode = None
+    except OSError as error:
+        errors.append(f"could not inspect managed root {root}: {error}")
+        root_mode = False
+    if root_mode is not None and (
+        root_mode is False
+        or stat.S_ISLNK(root_mode)
+        or not stat.S_ISDIR(root_mode)
+    ):
+        if root_mode is not False:
+            errors.append(f"managed root must be a real directory: {root}")
+    else:
+        with doctor_operation_lock(root, errors):
+            doctor_inspection(root, errors, warnings)
+    for message in sorted(errors):
+        print(f"skillset: error: {printable_text(message)}", file=sys.stderr)
+    for message in sorted(warnings):
+        print(f"skillset: warning: {printable_text(message)}", file=sys.stderr)
+    return 1 if errors else 0
+
+
+def delegate_skills(root, arguments, home_lock, lock_file, command_parser):
     validate_layout(root)
     upstream_arguments = list(arguments)
     if upstream_arguments:
@@ -736,6 +1046,7 @@ def delegate_skills(root, arguments, lock_file, command_parser):
 
     child_environment = os.environ.copy()
     child_environment.pop("XDG_STATE_HOME", None)
+    os.set_inheritable(home_lock, True)
     os.set_inheritable(lock_file.fileno(), True)
     try:
         os.execvpe(
@@ -766,6 +1077,7 @@ def parser():
     commands.add_parser("current", help="print the active skillset name")
     show_parser = commands.add_parser("show", help="show skills in a skillset")
     show_parser.add_argument("name")
+    commands.add_parser("doctor", help="diagnose the managed layout")
     skills_parser = commands.add_parser(
         "skills", help="run managed upstream skills", add_help=False
     )
@@ -778,40 +1090,64 @@ def main():
     arguments = command_parser.parse_args()
     root = Path.home() / ".agents"
     inspection = arguments.command in {"list", "current", "show"}
+    status = 0
     try:
-        with operation_lock(root, create=not inspection) as lock_file:
-            if arguments.command == "init":
-                init(root, arguments.name)
-            elif arguments.command == "create":
-                create(root, arguments.name, arguments.source)
-            elif arguments.command == "use":
-                use(root, arguments.name)
-            elif arguments.command == "rename":
-                rename(root, arguments.old, arguments.new)
-            elif arguments.command == "remove":
-                remove(root, arguments.name, arguments.yes)
-            elif arguments.command == "list":
-                list_sets(root, arguments.verbose)
-            elif arguments.command == "current":
-                current(root)
-            elif arguments.command == "show":
-                show(root, arguments.name)
-            elif arguments.command == "skills":
-                delegate_skills(
-                    root, arguments.arguments, lock_file, command_parser
-                )
+        with stable_home_lock(root) as home_lock:
+            if arguments.command == "doctor":
+                status = doctor(root)
             else:
-                raise OperationalError(f"unsupported command: {arguments.command}")
+                with operation_lock(root, create=not inspection) as lock_file:
+                    if arguments.command == "init":
+                        init(root, arguments.name)
+                    elif arguments.command == "create":
+                        create(root, arguments.name, arguments.source)
+                    elif arguments.command == "use":
+                        use(root, arguments.name)
+                    elif arguments.command == "rename":
+                        rename(root, arguments.old, arguments.new)
+                    elif arguments.command == "remove":
+                        remove(root, arguments.name, arguments.yes)
+                    elif arguments.command == "list":
+                        list_sets(root, arguments.verbose)
+                    elif arguments.command == "current":
+                        current(root)
+                    elif arguments.command == "show":
+                        show(root, arguments.name)
+                    elif arguments.command == "skills":
+                        delegate_skills(
+                            root,
+                            arguments.arguments,
+                            home_lock,
+                            lock_file,
+                            command_parser,
+                        )
+                    else:
+                        raise OperationalError(
+                            f"unsupported command: {arguments.command}"
+                        )
     except OperationalError as error:
-        print(f"skillset: {error}", file=sys.stderr)
+        if arguments.command == "doctor":
+            print(f"skillset: error: {printable_text(error)}", file=sys.stderr)
+        else:
+            print(f"skillset: {printable_text(error)}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("skillset: interrupted", file=sys.stderr)
         return 130
     except Exception as error:
-        print(f"skillset: operation failed: {error}", file=sys.stderr)
+        if arguments.command == "doctor":
+            finding = f"doctor inspection failed: {error}"
+            print(
+                f"skillset: error: {printable_text(finding)}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"skillset: operation failed: {printable_text(error)}",
+                file=sys.stderr,
+            )
         return 1
-    return 0
+    return status
 
 
 if __name__ == "__main__":

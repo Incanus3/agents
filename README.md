@@ -2,7 +2,7 @@
 
 `skillset` manages multiple named global agent skill collections under
 `~/.agents/skillsets` and activates one collection through stable relative
-symlinks. The current Linux-only core provides lifecycle and inspection
+symlinks. The Linux-only CLI provides lifecycle, inspection, and diagnostic
 commands plus managed delegation to the upstream `skills` CLI.
 
 ## Requirements and PATH
@@ -73,7 +73,7 @@ If active retargeting fails before it commits, the directory rename is rolled
 back. If rollback cannot restore a valid layout, the error names the old, new,
 and active paths and identifies the remaining data location. Preserve that copy
 and inspect the reported state before either moving the set back or retargeting
-`active`; run `skillset doctor` when it is available.
+`active`; then run `skillset doctor`.
 
 ## Remove skillsets
 
@@ -141,7 +141,42 @@ displayed values.
 Malformed, non-UTF-8, or invalid decoded-Unicode candidates remain visible as
 `<directory> — [invalid: <reason>]`; verbose `list` omits them. Direct regular
 files are ignored. Direct skill-directory symlinks and `SKILL.md` symlinks are
-never followed.
+never followed. Declared names and descriptions preserve ordinary printable
+Unicode, while terminal controls, invisible format controls, and line/paragraph
+separators are rendered as deterministic `\xNN`, `\uNNNN`, or `\UNNNNNNNN`
+escapes. Wrapper-created tabs, em dashes, and line endings remain unchanged.
+
+## Diagnose the managed layout
+
+Run the read-only diagnostic command after initialization, when another command
+reports an invalid layout, or before attempting manual recovery:
+
+```sh
+skillset doctor
+```
+
+`doctor` first takes the stable advisory lock on the existing HOME directory. It
+then inspects `.skillset.lock` without following it and, when it is a real regular
+file, holds that lock for the full inspection. A missing `.agents` root or a
+missing, symlinked, or nonregular managed lock is reported alongside missing
+aliases, `active`, and `skillsets`; neither path is created. `doctor` never
+creates, removes, rewrites, retargets, or repairs state, and does not stop at the
+first invalid component. It checks all three canonical aliases, the active target
+grammar and existence, direct skillset directory names and shapes, stale
+use/create staging markers, readable version-3 lockfiles, and each direct skill
+directory's `SKILL.md` metadata. Set directories, skill directories, and
+`SKILL.md` files must be real entries; diagnostic inspection never follows their
+symlinks.
+
+Every finding is written to stderr on one line. Structural, alias, lockfile,
+metadata, symlink, and staging problems are `skillset: error:` findings. A lock
+entry without a corresponding real direct skill directory, or an installed
+directory absent from the lockfile, is a `skillset: warning:` finding. Direct
+regular files under `skills` are not installed skill directories and are
+otherwise ignored. Finding text uses the same visible escaping for controls and
+line separators, so each finding remains one physical line. Errors are printed
+before warnings. Any error produces exit status 1; warnings alone and a healthy
+layout produce status 0. A healthy run may print nothing.
 
 ## Install and maintain skills
 
@@ -173,17 +208,32 @@ upstream arguments or output. The delegated process inherits terminal streams,
 signals, and exit status; only its copied environment has `XDG_STATE_HOME`
 removed so lock metadata resolves through the active managed alias.
 
-All `skillset` management, inspection, and delegated operations share one
-advisory lock. Inspection waits for that lock, validates the complete managed
-layout, and remains read-only. Delegation holds the lock for the complete
-`npx skills` process lifetime, so wrapper operations safely wait for one
-another. Prefer `skillset skills ...` after initialization: direct `npx skills`
-commands cannot honor this lock and must not run concurrently with `skillset`
-operations.
+All `skillset` management, inspection, diagnostic, and delegated operations first
+take a stable, non-creating advisory lock on the existing HOME directory. Routine
+operations then take `~/.agents/.skillset.lock`, always in that order, and retain
+its existing on-disk compatibility. Routine inspection validates the complete
+managed layout and remains read-only; `doctor` aggregates invalid and partial
+state and acquires the managed lock only when it is a safe regular file.
+Delegation preserves both locks for the complete `npx skills` process lifetime,
+so wrapper operations safely wait for one another. After initialization, always
+prefer `skillset skills ...` for global installation and maintenance. Direct
+`npx skills` commands cannot honor these locks and must not run concurrently with
+any `skillset` operation.
 
 ## Recovery
 
 Operations refuse invalid layouts and stale staging paths without deleting
-them. When an error names recovery paths, inspect those paths before changing
-anything and preserve the only remaining copy of any skill data. Automated
-diagnostics and repair guidance will be added with the later `doctor` command.
+them. When an error names recovery paths:
+
+1. Preserve the only remaining copy of every skill directory and lockfile.
+2. Run `skillset doctor` and review every error and warning before changing
+   anything.
+3. Inspect the concrete original, staged, old, new, and active paths named by
+   the failed operation.
+4. Restore a missing original only from its staged counterpart, or move a set
+   back/retarget `active` only after confirming which path contains the data.
+5. Run `skillset doctor` again after manual recovery.
+
+`doctor` is deliberately strict and non-repairing: it never deletes stale
+markers, rewrites lock metadata, changes aliases, or chooses between competing
+copies. Resolve findings manually only after preserving the data they identify.

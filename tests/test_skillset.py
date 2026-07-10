@@ -270,6 +270,47 @@ class SkillsetTests(unittest.TestCase):
     def assert_refused(self, result):
         self.assertEqual(result.returncode, 1, (result.stdout, result.stderr))
 
+    def doctor_findings(self, result, severity):
+        prefix = f"skillset: {severity}:"
+        self.assertNotIn(prefix, result.stdout)
+        for line in result.stderr.splitlines():
+            if line:
+                self.assertTrue(
+                    line.startswith(("skillset: error:", "skillset: warning:")),
+                    line,
+                )
+        return [
+            line for line in result.stderr.splitlines() if line.startswith(prefix)
+        ]
+
+    def assert_finding_line(self, lines, *fragments):
+        lowered = [line.lower() for line in lines]
+        expected = tuple(str(fragment).lower() for fragment in fragments)
+        matches = [
+            line for line in lowered if all(fragment in line for fragment in expected)
+        ]
+        self.assertEqual(len(matches), 1, (expected, lines))
+
+    def assert_uninitialized_doctor_findings(self, result, root):
+        errors = self.doctor_findings(result, "error")
+        expected = (
+            (root / ".skillset.lock", "lock", "missing"),
+            (root / "skills", "alias", "missing"),
+            (root / ".skill-lock.json", "alias", "missing"),
+            (root / "active", "active", "missing"),
+            (root / "skillsets", "skillsets", "missing"),
+        )
+        for fragments in expected:
+            with self.subTest(finding=fragments):
+                self.assert_finding_line(errors, *fragments)
+        self.assertGreaterEqual(len(errors), len(expected))
+        return errors
+
+    def assert_no_doctor_findings(self, result):
+        output = result.stdout + result.stderr
+        self.assertNotIn("skillset: error:", output)
+        self.assertNotIn("skillset: warning:", output)
+
     def test_help_includes_exact_supported_commands(self):
         result = self.run_cli("--help")
 
@@ -288,8 +329,649 @@ class SkillsetTests(unittest.TestCase):
                 "list",
                 "current",
                 "show",
+                "doctor",
             },
         )
+
+    def test_doctor_accepts_healthy_state_without_mutation_or_findings(self):
+        self.initialize()
+        skills = self.root / "skillsets" / "default" / "skills"
+        self.write_skill(skills, "alpha", """
+            name: alpha
+            description: healthy metadata
+        """)
+        self.write_lock(
+            self.root / "skillsets" / "default" / ".skill-lock.json",
+            {"version": 3, "skills": {"alpha": {}}, "dismissed": {}},
+        )
+        before = self.filesystem_snapshot(self.home)
+
+        result = self.run_cli("doctor")
+
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assert_no_doctor_findings(result)
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_doctor_aggregates_pristine_home_without_creating_agents_root(self):
+        before = self.filesystem_snapshot(self.home)
+
+        result = self.run_cli("doctor")
+
+        self.assert_refused(result)
+        self.assertEqual(result.stdout, "")
+        self.assert_uninitialized_doctor_findings(result, self.root)
+        self.assertEqual(self.doctor_findings(result, "warning"), [])
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_doctor_aggregates_existing_root_with_missing_advisory_lock(self):
+        self.root.mkdir()
+        before = self.filesystem_snapshot(self.home)
+
+        result = self.run_cli("doctor")
+
+        self.assert_refused(result)
+        self.assertEqual(result.stdout, "")
+        self.assert_uninitialized_doctor_findings(result, self.root)
+        self.assertEqual(self.doctor_findings(result, "warning"), [])
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_doctor_refuses_non_directory_managed_roots_without_child_access(self):
+        for index, kind in enumerate(("symlink", "regular-file")):
+            with self.subTest(kind=kind):
+                home = self.new_home(f"doctor-managed-root-{index}")
+                root = home / ".agents"
+                external_root = None
+                if kind == "symlink":
+                    external_home = self.new_home("doctor-external-layout")
+                    external_root = self.make_managed_layout(external_home)
+                    (external_root / ".skillset.lock").write_text("", encoding="utf-8")
+                    self.write_skill(
+                        external_root / "skillsets" / "default" / "skills",
+                        "external-sentinel",
+                        "name: external-sentinel\n"
+                        "description: metadata beyond the managed-root boundary",
+                    )
+                    self.write_lock(
+                        external_root / "skillsets" / "default" / ".skill-lock.json",
+                        {
+                            "version": 3,
+                            "skills": {"external-sentinel": {}},
+                            "dismissed": {},
+                        },
+                    )
+                    root.symlink_to(external_root, target_is_directory=True)
+                else:
+                    root.write_bytes(b"not a managed directory\n")
+
+                followed = self.sandbox / f"doctor-managed-root-followed-{index}"
+                child_prefix = str(root) + os.sep
+                fault = self.fault_environment(
+                    f"""
+                    import os
+                    from pathlib import Path
+                    marker = Path({str(followed)!r})
+                    child_prefix = {child_prefix!r}
+                    original_lstat = os.lstat
+                    def guarded_lstat(path, *args, **kwargs):
+                        candidate = os.fspath(path)
+                        if isinstance(candidate, str) and candidate.startswith(child_prefix):
+                            marker.write_text(candidate, encoding="utf-8")
+                        return original_lstat(path, *args, **kwargs)
+                    os.lstat = guarded_lstat
+                    """
+                )
+                home_before = self.filesystem_snapshot(home)
+                external_before = (
+                    self.filesystem_snapshot(external_root)
+                    if external_root is not None
+                    else None
+                )
+
+                result = self.run_cli(
+                    "doctor", home=home, extra_environment=fault
+                )
+
+                self.assert_refused(result)
+                self.assertEqual(result.stdout, "")
+                errors = self.doctor_findings(result, "error")
+                self.assertEqual(len(errors), 1, errors)
+                finding = errors[0].lower()
+                self.assertIn(str(root).lower(), finding)
+                self.assertIn("managed root", finding)
+                self.assertIn("real directory", finding)
+                self.assertEqual(self.doctor_findings(result, "warning"), [])
+                self.assertNotIn("healthy", result.stderr.lower())
+                self.assertNotIn("external-sentinel", result.stderr)
+                self.assertNotIn("metadata beyond", result.stderr)
+                self.assertFalse(followed.exists(), "doctor inspected a managed-root child")
+                self.assertEqual(self.filesystem_snapshot(home), home_before)
+                if external_root is not None:
+                    self.assertEqual(
+                        self.filesystem_snapshot(external_root), external_before
+                    )
+
+    def test_doctor_rejects_symlinked_skillsets_before_descendant_access(self):
+        external_skillsets = self.sandbox / "external-skillsets"
+        default = external_skillsets / "default"
+        (default / "skills").mkdir(parents=True)
+        self.write_skill(
+            default / "skills",
+            "external-sentinel",
+            "name: external-sentinel\n"
+            "description: metadata beyond the skillsets container boundary",
+        )
+        self.write_lock(
+            default / ".skill-lock.json",
+            {
+                "version": 3,
+                "skills": {"external-sentinel": {}},
+                "dismissed": {},
+            },
+        )
+
+        self.root.mkdir()
+        (self.root / ".skillset.lock").write_text("", encoding="utf-8")
+        skillsets = self.root / "skillsets"
+        skillsets.symlink_to(external_skillsets, target_is_directory=True)
+        (self.root / "active").symlink_to("skillsets/default")
+        (self.root / "skills").symlink_to("active/skills")
+        (self.root / ".skill-lock.json").symlink_to("active/.skill-lock.json")
+
+        descendant_accessed = self.sandbox / "doctor-skillsets-descendant-accessed"
+        descendant_prefix = str(skillsets) + os.sep
+        fault = self.fault_environment(
+            f"""
+            import os
+            from pathlib import Path
+            marker = Path({str(descendant_accessed)!r})
+            descendant_prefix = {descendant_prefix!r}
+            original_lstat = os.lstat
+            original_iterdir = Path.iterdir
+            def guarded_lstat(path, *args, **kwargs):
+                candidate = os.fsdecode(os.fspath(path))
+                if candidate.startswith(descendant_prefix):
+                    marker.write_text(candidate, encoding="utf-8")
+                return original_lstat(path, *args, **kwargs)
+            def guarded_iterdir(path, *args, **kwargs):
+                candidate = os.fsdecode(os.fspath(path))
+                if candidate == descendant_prefix.rstrip(os.sep):
+                    marker.write_text(candidate, encoding="utf-8")
+                return original_iterdir(path, *args, **kwargs)
+            os.lstat = guarded_lstat
+            Path.iterdir = guarded_iterdir
+            """
+        )
+        home_before = self.filesystem_snapshot(self.home)
+        external_before = self.filesystem_snapshot(external_skillsets)
+
+        result = self.run_cli("doctor", extra_environment=fault)
+
+        self.assert_refused(result)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(
+            self.doctor_findings(result, "error"),
+            [f"skillset: error: skillsets directory symlink is not allowed: {skillsets}"],
+        )
+        self.assertEqual(self.doctor_findings(result, "warning"), [])
+        self.assertNotIn("external-sentinel", result.stdout + result.stderr)
+        self.assertNotIn("metadata beyond", result.stdout + result.stderr)
+        self.assertFalse(
+            descendant_accessed.exists(),
+            "doctor inspected a descendant beneath the symlinked skillsets container",
+        )
+        self.assertEqual(self.filesystem_snapshot(self.home), home_before)
+        self.assertEqual(
+            self.filesystem_snapshot(external_skillsets), external_before
+        )
+
+    def test_doctor_aggregates_uninitialized_state_without_creating_files(self):
+        self.root.mkdir()
+        (self.root / ".skillset.lock").write_text("", encoding="utf-8")
+        before = self.filesystem_snapshot(self.home)
+
+        result = self.run_cli("doctor")
+
+        self.assert_refused(result)
+        errors = "\n".join(self.doctor_findings(result, "error")).lower()
+        for component in ("skillsets", "active", "skills", ".skill-lock.json"):
+            with self.subTest(component=component):
+                self.assertIn(component, errors)
+        self.assertGreaterEqual(len(self.doctor_findings(result, "error")), 4)
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_doctor_aggregates_partial_and_structurally_invalid_state(self):
+        self.root.mkdir()
+        (self.root / ".skillset.lock").write_text("", encoding="utf-8")
+        skillsets = self.root / "skillsets"
+        skillsets.mkdir()
+        (self.root / "active").write_text("not an alias\n", encoding="utf-8")
+        (self.root / "skills").symlink_to("skillsets/default/skills")
+        (self.root / ".skillset-use.staging").write_text(
+            "stale use state\n", encoding="utf-8"
+        )
+        (skillsets / ".skillset-create-orphan.staging").mkdir()
+
+        default = skillsets / "default"
+        default.mkdir()
+        self.write_lock(default / ".skill-lock.json", raw="{malformed\n")
+        self.make_set(
+            self.root,
+            "wrongversion",
+            {"version": 2, "skills": {}, "dismissed": {}},
+        )
+        self.make_set(self.root, "Bad Name")
+        external = self.home / "external-set"
+        (external / "skills").mkdir(parents=True)
+        self.write_lock(external / ".skill-lock.json")
+        (skillsets / "linked").symlink_to(external, target_is_directory=True)
+        before = self.filesystem_snapshot(self.home)
+
+        result = self.run_cli("doctor")
+
+        self.assert_refused(result)
+        error_lines = self.doctor_findings(result, "error")
+        expected_findings = (
+            (default / "skills", "missing"),
+            (default / ".skill-lock.json", "invalid"),
+            (skillsets / "wrongversion" / ".skill-lock.json", "version"),
+            (skillsets / "Bad Name", "invalid", "name"),
+            (skillsets / "linked", "symlink"),
+            (self.root / ".skillset-use.staging", "stale"),
+            (skillsets / ".skillset-create-orphan.staging", "stale"),
+            (self.root / "active", "symlink"),
+            (self.root / "skills", "alias", "canonical"),
+            (self.root / ".skill-lock.json", "alias", "missing"),
+        )
+        for fragments in expected_findings:
+            with self.subTest(finding=fragments):
+                self.assert_finding_line(error_lines, *fragments)
+        self.assertGreaterEqual(len(error_lines), len(expected_findings))
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_doctor_reports_nonregular_advisory_locks_and_continues_diagnosis(self):
+        cases = (
+            ("symlink", "symlink"),
+            ("directory", "regular"),
+        )
+        for index, (kind, reason) in enumerate(cases):
+            with self.subTest(kind=kind):
+                home = self.new_home(f"doctor-nonregular-lock-{index}")
+                root = home / ".agents"
+                root.mkdir()
+                lock_path = root / ".skillset.lock"
+                fault = None
+                followed = None
+                if kind == "symlink":
+                    external = home / "external-lock"
+                    external.write_bytes(b"must not be opened through the link")
+                    lock_path.symlink_to("../external-lock")
+                    followed = self.sandbox / "doctor-followed-lock-symlink"
+                    identity = (external.stat().st_dev, external.stat().st_ino)
+                    fault = self.fault_environment(
+                        f"""
+                        import fcntl
+                        import os
+                        from pathlib import Path
+                        marker = Path({str(followed)!r})
+                        external_identity = {identity!r}
+                        original_flock = fcntl.flock
+                        def guarded_flock(file, operation):
+                            descriptor = file if isinstance(file, int) else file.fileno()
+                            metadata = os.fstat(descriptor)
+                            if (metadata.st_dev, metadata.st_ino) == external_identity:
+                                marker.write_text("followed", encoding="utf-8")
+                            return original_flock(file, operation)
+                        fcntl.flock = guarded_flock
+                        """
+                    )
+                else:
+                    lock_path.mkdir()
+                before = self.filesystem_snapshot(home)
+
+                result = self.run_cli(
+                    "doctor", home=home, extra_environment=fault
+                )
+
+                self.assert_refused(result)
+                errors = self.doctor_findings(result, "error")
+                self.assert_finding_line(errors, lock_path, "lock", reason)
+                for path, category in (
+                    (root / "skills", "alias"),
+                    (root / ".skill-lock.json", "alias"),
+                    (root / "active", "active"),
+                    (root / "skillsets", "skillsets"),
+                ):
+                    self.assert_finding_line(errors, path, category, "missing")
+                if followed is not None:
+                    self.assertFalse(followed.exists(), "doctor followed lock symlink")
+                self.assertEqual(self.filesystem_snapshot(home), before)
+
+    def test_doctor_diagnoses_noncanonical_aliases_and_active_targets(self):
+        def relink(path, target):
+            path.unlink()
+            path.symlink_to(target)
+
+        cases = (
+            (
+                "skills-alias",
+                ("skills", "alias"),
+                lambda root: relink(root / "skills", "skillsets/default/skills"),
+            ),
+            (
+                "lock-alias",
+                (".skill-lock.json", "alias"),
+                lambda root: relink(
+                    root / ".skill-lock.json",
+                    "skillsets/default/.skill-lock.json",
+                ),
+            ),
+            (
+                "absolute-active",
+                ("active", "canonical"),
+                lambda root: relink(
+                    root / "active", str(root / "skillsets" / "default")
+                ),
+            ),
+            (
+                "missing-active-target",
+                ("active", "missing"),
+                lambda root: relink(root / "active", "skillsets/missing"),
+            ),
+        )
+        for index, (label, keywords, mutate) in enumerate(cases):
+            with self.subTest(layout=label):
+                home = self.new_home(f"doctor-alias-{index}")
+                root = self.make_managed_layout(home)
+                (root / ".skillset.lock").write_text("", encoding="utf-8")
+                mutate(root)
+                before = self.filesystem_snapshot(home)
+
+                result = self.run_cli("doctor", home=home)
+
+                self.assert_refused(result)
+                errors = "\n".join(
+                    self.doctor_findings(result, "error")
+                ).lower()
+                for keyword in keywords:
+                    self.assertIn(keyword, errors)
+                self.assertEqual(self.filesystem_snapshot(home), before)
+
+    def test_doctor_reports_all_invalid_skill_metadata_as_errors(self):
+        self.initialize()
+        skills = self.root / "skillsets" / "default" / "skills"
+        invalid_utf = skills / "invalid-utf"
+        invalid_utf.mkdir()
+        invalid_utf.joinpath("SKILL.md").write_bytes(
+            b"---\nname: invalid-utf\ndescription: \xff\n---\n"
+        )
+        malformed = skills / "malformed-frontmatter"
+        malformed.mkdir()
+        malformed.joinpath("SKILL.md").write_text(
+            "---\nname: malformed\ndescription: no closing delimiter\n",
+            encoding="utf-8",
+        )
+        (skills / "missing-skill-file").mkdir()
+        self.write_skill(skills, "valid-sibling", """
+            name: valid-sibling
+            description: valid metadata does not hide sibling errors
+        """)
+        self.write_lock(
+            self.root / "skillsets" / "default" / ".skill-lock.json",
+            {
+                "version": 3,
+                "skills": {
+                    "invalid-utf": {},
+                    "malformed-frontmatter": {},
+                    "missing-skill-file": {},
+                    "valid-sibling": {},
+                },
+                "dismissed": {},
+            },
+        )
+        before = self.filesystem_snapshot(self.home)
+
+        result = self.run_cli("doctor")
+
+        self.assert_refused(result)
+        errors = self.doctor_findings(result, "error")
+        expected = {
+            "invalid-utf": "utf",
+            "malformed-frontmatter": "frontmatter",
+            "missing-skill-file": "skill.md",
+        }
+        for directory, reason in expected.items():
+            with self.subTest(directory=directory):
+                self.assert_finding_line(errors, directory, reason)
+        self.assertEqual(self.doctor_findings(result, "warning"), [])
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_doctor_lock_content_mismatches_are_warning_only_in_both_directions(self):
+        self.initialize()
+        skillset = self.root / "skillsets" / "default"
+        self.write_skill(skillset / "skills", "directory-only", """
+            name: directory-only
+            description: installed without lock metadata
+        """)
+        self.write_lock(
+            skillset / ".skill-lock.json",
+            {"version": 3, "skills": {"lock-only": {}}, "dismissed": {}},
+        )
+        before = self.filesystem_snapshot(self.home)
+
+        result = self.run_cli("doctor")
+
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assertEqual(self.doctor_findings(result, "error"), [])
+        warnings = self.doctor_findings(result, "warning")
+        self.assertEqual(len(warnings), 2, warnings)
+        self.assert_finding_line(
+            warnings, "directory-only", "installed", "missing", "lockfile"
+        )
+        self.assert_finding_line(
+            warnings, "lock-only", "lockfile", "no real", "directory"
+        )
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_doctor_escapes_terminal_controls_on_one_physical_line_per_finding(self):
+        self.initialize()
+        unsafe_name = "bad\x1b\u2028\u2029name"
+        self.make_set(self.root, unsafe_name)
+        before = self.filesystem_snapshot(self.home)
+
+        result = self.run_cli("doctor")
+
+        self.assert_refused(result)
+        self.assertEqual(result.stdout, "")
+        for raw in ("\x1b", "\u2028", "\u2029"):
+            self.assertNotIn(raw, result.stderr)
+        self.assertIn(r"bad\x1b\u2028\u2029name", result.stderr)
+        errors = self.doctor_findings(result, "error")
+        self.assertEqual(len(errors), 1, errors)
+        self.assertEqual(result.stderr.splitlines(), errors)
+        self.assertEqual(self.doctor_findings(result, "warning"), [])
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_doctor_ignores_regular_skill_entries_and_never_follows_skill_symlinks(self):
+        self.initialize()
+        skillset = self.root / "skillsets" / "default"
+        skills = skillset / "skills"
+        (skills / "ordinary-file").write_text("not a directory\n", encoding="utf-8")
+        external = self.home / "external-skill"
+        external.mkdir()
+        external.joinpath("SKILL.md").write_text(
+            "---\nname: external-secret\ndescription: must not be read\n---\n",
+            encoding="utf-8",
+        )
+        (skills / "linked-directory").symlink_to(
+            external, target_is_directory=True
+        )
+        linked_file = skills / "linked-skill-file"
+        linked_file.mkdir()
+        linked_file.joinpath("SKILL.md").symlink_to(external / "SKILL.md")
+        self.write_lock(
+            skillset / ".skill-lock.json",
+            {
+                "version": 3,
+                "skills": {
+                    "ordinary-file": {},
+                    "linked-directory": {},
+                    "linked-skill-file": {},
+                },
+                "dismissed": {},
+            },
+        )
+        before = self.filesystem_snapshot(self.home)
+
+        result = self.run_cli("doctor")
+
+        self.assert_refused(result)
+        errors = "\n".join(self.doctor_findings(result, "error")).lower()
+        self.assertIn("linked-directory", errors)
+        self.assertIn("linked-skill-file", errors)
+        self.assertIn("symlink", errors)
+        warnings = "\n".join(self.doctor_findings(result, "warning")).lower()
+        self.assertIn("ordinary-file", warnings)
+        self.assertNotIn("external-secret", result.stdout + result.stderr)
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_doctor_waits_for_advisory_lock_without_blind_sleep(self):
+        self.initialize()
+        attempted = self.sandbox / "doctor-lock-attempted"
+        fault = self.fault_environment(
+            f"""
+            import fcntl
+            from pathlib import Path
+            marker = Path({str(attempted)!r})
+            original_flock = fcntl.flock
+            def marked_flock(file, operation):
+                if operation & fcntl.LOCK_EX:
+                    marker.write_text("attempted", encoding="utf-8")
+                return original_flock(file, operation)
+            fcntl.flock = marked_flock
+            """
+        )
+        process = None
+        with (self.root / ".skillset.lock").open("a+") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            process = self.popen_cli("doctor", extra_environment=fault)
+            try:
+                self.wait_for_path(attempted, process)
+                self.assertIsNone(process.poll(), "doctor did not block on the lock")
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=2)
+        self.assertEqual(process.returncode, 0, (stdout, stderr))
+        self.assert_no_doctor_findings(
+            subprocess.CompletedProcess([], process.returncode, stdout, stderr)
+        )
+
+    def test_pristine_home_doctor_locks_home_directory_before_diagnosis(self):
+        attempted = self.sandbox / "pristine-doctor-lock-attempted"
+        fault = self.fault_environment(
+            f"""
+            import fcntl
+            from pathlib import Path
+            marker = Path({str(attempted)!r})
+            original_flock = fcntl.flock
+            def marked_flock(file, operation):
+                if operation & fcntl.LOCK_EX:
+                    marker.write_text("attempted", encoding="utf-8")
+                return original_flock(file, operation)
+            fcntl.flock = marked_flock
+            """
+        )
+        before = self.filesystem_snapshot(self.home)
+        home_fd = os.open(self.home, os.O_RDONLY | os.O_DIRECTORY)
+        process = None
+        try:
+            fcntl.flock(home_fd, fcntl.LOCK_EX)
+            process = self.popen_cli("doctor", extra_environment=fault)
+            self.wait_for_path(attempted, process)
+            self.assertIsNone(process.poll(), "doctor did not block on HOME")
+            fcntl.flock(home_fd, fcntl.LOCK_UN)
+            stdout, stderr = process.communicate(timeout=5)
+        finally:
+            fcntl.flock(home_fd, fcntl.LOCK_UN)
+            os.close(home_fd)
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=2)
+
+        result = subprocess.CompletedProcess([], process.returncode, stdout, stderr)
+        self.assert_refused(result)
+        self.assert_uninitialized_doctor_findings(result, self.root)
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_noninitializing_commands_share_invalid_layout_fail_fast_boundary(self):
+        self.initialize()
+        self.make_set(self.root, "victim")
+        staging = self.root / ".skillset-use.staging"
+        staging.write_text("common invalid state\n", encoding="utf-8")
+        environment, record = self.fake_npx_environment()
+        before = self.filesystem_snapshot(self.home)
+        commands = (
+            ("create", "new"),
+            ("use", "default"),
+            ("rename", "victim", "renamed"),
+            ("remove", "victim", "--yes"),
+            ("list",),
+            ("current",),
+            ("show", "default"),
+            ("skills", "list"),
+        )
+
+        for arguments in commands:
+            with self.subTest(command=arguments[0]):
+                result = self.run_cli(
+                    *arguments, extra_environment=environment, input_text="yes\n"
+                )
+                self.assert_refused(result)
+                self.assertIn(str(staging), result.stdout + result.stderr)
+                self.assertNotIn("Remove skillset", result.stderr)
+                self.assertEqual(self.filesystem_snapshot(self.home), before)
+                self.assertFalse(record.exists(), f"{arguments[0]} invoked npx")
+
+    def test_complete_command_workflow_and_managed_delegation(self):
+        environment, record = self.fake_npx_environment()
+
+        initialized = self.run_cli("init", "baseline")
+        created = self.run_cli("create", "experiment")
+        activated = self.run_cli("use", "experiment")
+        listed = self.run_cli("list")
+        current = self.run_cli("current")
+        shown = self.run_cli("show", "experiment")
+        renamed = self.run_cli("rename", "experiment", "trial")
+        removed = self.run_cli("remove", "baseline", "--yes")
+        delegated = self.run_cli(
+            "skills", "list", "--json", extra_environment=environment
+        )
+        diagnosed = self.run_cli("doctor")
+
+        for result in (
+            initialized,
+            created,
+            activated,
+            listed,
+            current,
+            shown,
+            renamed,
+            removed,
+            delegated,
+            diagnosed,
+        ):
+            self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assertEqual(listed.stdout, "baseline\n* experiment\n")
+        self.assertEqual(current.stdout, "experiment\n")
+        self.assertEqual(shown.stdout, "")
+        self.assert_aliases(self.root, "trial")
+        self.assertFalse(os.path.lexists(self.root / "skillsets" / "baseline"))
+        self.assert_fake_argv(record, ["skills", "list", "--json", "--global"])
+        self.assert_no_doctor_findings(diagnosed)
 
     def test_list_sorts_set_names_and_marks_only_the_active_set(self):
         self.initialize("middle")
@@ -328,6 +1010,32 @@ class SkillsetTests(unittest.TestCase):
                 self.assertEqual(result.stdout, expected)
                 self.assertEqual(result.stderr, "")
 
+    def test_verbose_list_visibly_escapes_declared_name_terminal_controls(self):
+        self.initialize()
+        skills = self.root / "skillsets" / "default" / "skills"
+        declared = "jalapeño\x1b\x7f\u202eoutil"
+        description = "résumé\x1b\x9b\u2066 text"
+        self.write_skill(
+            skills,
+            "control-display",
+            f"name: {declared}\ndescription: {description}",
+        )
+        before = self.filesystem_snapshot(self.home)
+
+        result = self.run_cli("list", "--verbose")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        for raw in ("\x1b", "\x7f", "\x9b", "\u202e", "\u2066"):
+            self.assertNotIn(raw, result.stdout)
+        self.assertEqual(
+            result.stdout,
+            "* default\tjalapeño\\x1b\\x7f\\u202eoutil\n",
+        )
+        self.assertIn("jalapeño", result.stdout)
+        self.assertIn("\t", result.stdout)
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
     def test_current_prints_exact_active_name_before_and_after_use(self):
         self.initialize("default")
         self.make_set(self.root, "experiment")
@@ -343,6 +1051,27 @@ class SkillsetTests(unittest.TestCase):
         self.assertEqual(after.returncode, 0, after.stderr)
         self.assertEqual(after.stdout, "experiment\n")
         self.assertEqual(after.stderr, "")
+
+    def test_current_escapes_unsafe_operational_errors_at_the_final_boundary(self):
+        self.initialize()
+        unsafe_target = "outside\x1b\u202e\u2028managed-root"
+        (self.root / "active").unlink()
+        (self.root / "active").symlink_to(unsafe_target)
+        before = self.filesystem_snapshot(self.home)
+
+        result = self.run_cli("current")
+
+        self.assert_refused(result)
+        self.assertEqual(result.stdout, "")
+        lines = result.stderr.splitlines()
+        self.assertEqual(len(lines), 1, result.stderr)
+        self.assertTrue(result.stderr.endswith("\n"), result.stderr)
+        self.assertTrue(lines[0].startswith("skillset: "), lines[0])
+        for raw in ("\x1b", "\u202e", "\u2028"):
+            self.assertNotIn(raw, result.stderr)
+        for escaped in (r"\x1b", r"\u202e", r"\u2028"):
+            self.assertIn(escaped, result.stderr)
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
 
     def test_show_empty_set_has_empty_output(self):
         self.initialize()
@@ -424,6 +1153,52 @@ class SkillsetTests(unittest.TestCase):
             "quoted-comment — kept # hash\n",
         )
         self.assertEqual(result.stderr, "")
+
+    def test_show_visibly_escapes_metadata_terminal_controls(self):
+        self.initialize()
+        skills = self.root / "skillsets" / "default" / "skills"
+        declared = "café\x1b\x7f\u202eoutil"
+        description = "naïve\x1b\x9b\u2066 texte"
+        self.write_skill(
+            skills,
+            "control-display",
+            f"name: {declared}\ndescription: {description}",
+        )
+        before = self.filesystem_snapshot(self.home)
+
+        result = self.run_cli("show", "default")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        for raw in ("\x1b", "\x7f", "\x9b", "\u202e", "\u2066"):
+            self.assertNotIn(raw, result.stdout)
+        self.assertEqual(
+            result.stdout,
+            "café\\x1b\\x7f\\u202eoutil — "
+            "naïve\\x1b\\x9b\\u2066 texte\n",
+        )
+        self.assertIn("café", result.stdout)
+        self.assertIn("naïve", result.stdout)
+        self.assertIn(" — ", result.stdout)
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_show_visibly_escapes_invalid_directory_terminal_controls(self):
+        self.initialize()
+        skills = self.root / "skillsets" / "default" / "skills"
+        unsafe_directory = "café\x1b\u2028outil"
+        (skills / unsafe_directory).mkdir()
+        before = self.filesystem_snapshot(self.home)
+
+        result = self.run_cli("show", "default")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        for raw in ("\x1b", "\u2028"):
+            self.assertNotIn(raw, result.stdout)
+        expected = r"café\x1b\u2028outil — [invalid: missing SKILL.md]"
+        self.assertEqual(result.stdout.splitlines(), [expected])
+        self.assertIn("café", result.stdout)
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
 
     def test_show_reports_malformed_frontmatter_without_hiding_valid_siblings(self):
         self.initialize()
@@ -975,6 +1750,7 @@ class SkillsetTests(unittest.TestCase):
             ("current", "--verbose"),
             ("show",),
             ("show", "default", "extra"),
+            ("doctor", "extra"),
             ("unknown-command",),
         ]
         for arguments in cases:
@@ -2205,6 +2981,7 @@ class SkillsetTests(unittest.TestCase):
         self.assertIn(original_skills, report)
         self.assertIn(original_lock, report)
         self.assertIn(staged_set, report)
+        self.assertIn("doctor", report.lower())
 
 
 if __name__ == "__main__":
