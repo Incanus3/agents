@@ -267,6 +267,16 @@ def color_enabled(output):
     )
 
 
+def terminal_width(output):
+    try:
+        if not output.isatty():
+            return None
+        columns = os.get_terminal_size(output.fileno()).columns
+    except (AttributeError, OSError, ValueError):
+        return None
+    return columns if columns > 0 else None
+
+
 def styled(value, code, enabled):
     return f"{code}{value}{RESET}" if enabled else value
 
@@ -296,6 +306,9 @@ def show(root, name, output=None):
     divider = styled("|", DIM, colored)
     print(f"{header_left} {divider} {header_right}", file=output)
     separator = "-" * (left_width + 1) + "|" + "-" * (right_width + 1)
+    width = terminal_width(output)
+    if width is not None:
+        separator = separator[:width]
     print(styled(separator, DIM, colored), file=output)
     for left, right, reason in rows:
         left_cell = styled(left, CYAN, colored) if reason is None else left

@@ -6,8 +6,10 @@ import re
 import signal
 import shutil
 import stat
+import struct
 import subprocess
 import tempfile
+import termios
 import textwrap
 import time
 import unittest
@@ -63,13 +65,18 @@ class SkillsetTests(unittest.TestCase):
             check=False,
         )
 
-    def run_cli_tty(self, *arguments, extra_environment=None):
+    def run_cli_tty(
+        self, *arguments, extra_environment=None, terminal_columns=None
+    ):
         environment = self.environment()
         environment.pop("NO_COLOR", None)
         environment["TERM"] = "xterm-256color"
         if extra_environment:
             environment.update(extra_environment)
         master, slave = os.openpty()
+        if terminal_columns is not None:
+            dimensions = struct.pack("HHHH", 24, terminal_columns, 0, 0)
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, dimensions)
         process = subprocess.Popen(
             [str(SKILLSET), *arguments],
             cwd=self.home,
@@ -1178,6 +1185,40 @@ class SkillsetTests(unittest.TestCase):
             "longer-name | Longer description\n",
         )
         self.assertNotIn("\x1b", result.stdout)
+
+    def test_show_caps_only_tty_separator_to_terminal_width(self):
+        self.initialize()
+        skills = self.root / "skillsets/default/skills"
+        description = "This complete description remains unchanged past the terminal width."
+        self.write_skill(skills, "valid", f"name: alpha\ndescription: {description}")
+
+        colored = self.run_cli_tty("show", terminal_columns=20)
+
+        self.assertEqual(colored.returncode, 0, colored.stderr)
+        colored_separator = colored.stdout.splitlines()[1]
+        self.assertEqual(colored_separator, "\x1b[2m------|-------------\x1b[0m")
+        self.assertIn(description, colored.stdout)
+
+        for extra_environment in ({"NO_COLOR": "1"}, {"TERM": "dumb"}):
+            with self.subTest(environment=extra_environment):
+                plain_tty = self.run_cli_tty(
+                    "show",
+                    extra_environment=extra_environment,
+                    terminal_columns=20,
+                )
+
+                self.assertEqual(plain_tty.returncode, 0, plain_tty.stderr)
+                self.assertEqual(plain_tty.stdout.splitlines()[1], "------|-------------")
+                self.assertNotIn("\x1b", plain_tty.stdout)
+                self.assertIn(description, plain_tty.stdout)
+
+        captured = self.run_cli("show")
+
+        self.assertEqual(captured.returncode, 0, captured.stderr)
+        self.assertEqual(
+            captured.stdout.splitlines()[1], "------|" + "-" * (len(description) + 1)
+        )
+        self.assertIn(description, captured.stdout)
 
     def test_show_colorizes_only_eligible_tty_output(self):
         self.initialize()
