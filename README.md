@@ -40,6 +40,22 @@ Or clone both the complete skills tree and lock metadata from another set:
 skillset create experiment --from default
 ```
 
+Create and activate an empty set in one command:
+
+```sh
+skillset create --use experiment
+```
+
+Clone and activate in one command:
+
+```sh
+skillset create --use --from default experiment
+```
+
+Options may appear before or after `NAME`. If creation succeeds but activation
+fails before replacement, the new set remains and the previous set stays active;
+inspect it and retry `skillset use NAME`.
+
 Names use lowercase letters, digits, underscores, and hyphens, and must start
 with a letter or digit.
 

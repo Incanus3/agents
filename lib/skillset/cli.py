@@ -29,9 +29,20 @@ def parser():
     commands = command_parser.add_subparsers(dest="command", required=True)
     init_parser = commands.add_parser("init", help="adopt existing global skills")
     init_parser.add_argument("name")
-    create_parser = commands.add_parser("create", help="create an inactive skillset")
+    create_parser = commands.add_parser("create", help="create a skillset")
     create_parser.add_argument("name")
-    create_parser.add_argument("--from", dest="source", metavar="SOURCE")
+    create_parser.add_argument(
+        "--from",
+        dest="source",
+        metavar="SOURCE",
+        help="clone from an existing skillset",
+    )
+    create_parser.add_argument(
+        "--use",
+        dest="activate",
+        action="store_true",
+        help="activate the created skillset",
+    )
     use_parser = commands.add_parser("use", help="activate a skillset")
     use_parser.add_argument("name")
     rename_parser = commands.add_parser("rename", help="rename a skillset")
@@ -69,6 +80,8 @@ def main():
                         init(root, arguments.name)
                     elif arguments.command == "create":
                         create(root, arguments.name, arguments.source)
+                        if arguments.activate:
+                            use(root, arguments.name)
                     elif arguments.command == "use":
                         use(root, arguments.name)
                     elif arguments.command == "rename":

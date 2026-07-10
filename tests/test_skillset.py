@@ -315,6 +315,8 @@ class SkillsetTests(unittest.TestCase):
         result = self.run_cli("--help")
 
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("create a skillset", result.stdout)
+        self.assertNotIn("create an inactive skillset", result.stdout)
         command_group = re.search(r"\{([^}]+)\}", result.stdout)
         self.assertIsNotNone(command_group, result.stdout)
         self.assertEqual(
@@ -1737,6 +1739,7 @@ class SkillsetTests(unittest.TestCase):
             ("init", "default", "extra"),
             ("create",),
             ("create", "copy", "--from"),
+            ("create", "new", "--unknown"),
             ("use",),
             ("rename",),
             ("rename", "old"),
@@ -1934,6 +1937,90 @@ class SkillsetTests(unittest.TestCase):
         self.assertEqual(os.readlink(clone / "skills" / "alpha" / "tool-link"), "tool")
         self.assertEqual((clone / ".skill-lock.json").read_bytes(), lock_bytes)
         self.assertEqual(os.readlink(self.root / "active"), "skillsets/default")
+
+    def test_create_use_activates_with_options_before_and_after_name(self):
+        cases = (
+            ("empty-after", ("create", "empty-after", "--use"), False),
+            ("empty-before", ("create", "--use", "empty-before"), False),
+            ("clone-after", ("create", "clone-after", "--from", "default", "--use"), True),
+            ("clone-before", ("create", "--use", "--from", "default", "clone-before"), True),
+        )
+        for index, (name, arguments, cloned) in enumerate(cases):
+            home = self.new_home(f"create-use-{index}")
+            root = self.make_managed_layout(home)
+            source = root / "skillsets" / "default"
+            (source / "skills" / "source-marker").write_bytes(b"source payload")
+            lock_bytes = b'{"version":3,"skills":{},"dismissed":{}}\n'
+            (source / ".skill-lock.json").write_bytes(lock_bytes)
+            result = self.run_cli(*arguments, home=home)
+            with self.subTest(arguments=arguments):
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assert_aliases(root, name)
+                target = root / "skillsets" / name
+                if cloned:
+                    self.assertEqual(
+                        (target / "skills" / "source-marker").read_bytes(),
+                        b"source payload",
+                    )
+                    self.assertEqual((target / ".skill-lock.json").read_bytes(), lock_bytes)
+                else:
+                    self.assert_empty_set(root, name)
+
+    def test_create_use_creation_failure_does_not_change_active_set(self):
+        self.initialize()
+        occupied = self.make_set(self.root, "occupied")
+        marker = occupied / "skills" / "keep"
+        marker.write_bytes(b"untouched")
+        result = self.run_cli("create", "occupied", "--use")
+        self.assert_refused(result)
+        self.assertEqual(marker.read_bytes(), b"untouched")
+        self.assert_aliases(self.root, "default")
+
+    def test_create_use_activation_failure_keeps_new_set_and_previous_active(self):
+        self.initialize()
+        fault = self.fault_environment(f"""
+            import os
+            active = {str(self.root / 'active')!r}
+            original_replace = os.replace
+            def fail_active(source, destination, *args, **kwargs):
+                if os.path.abspath(os.fspath(destination)) == active:
+                    raise OSError("injected activation failure")
+                return original_replace(source, destination, *args, **kwargs)
+            os.replace = fail_active
+        """)
+        stable = {name: os.readlink(self.root / name)
+                  for name in ("active", "skills", ".skill-lock.json")}
+        result = self.run_cli("create", "experiment", "--use", extra_environment=fault)
+        self.assert_refused(result)
+        self.assert_empty_set(self.root, "experiment")
+        self.assertEqual({name: os.readlink(self.root / name) for name in stable}, stable)
+        self.assertFalse(os.path.lexists(self.root / ".skillset-use.staging"))
+
+    def test_create_use_post_replace_failure_preserves_committed_activation(self):
+        self.initialize()
+        fault = self.fault_environment(f"""
+            import os
+            active = {str(self.root / 'active')!r}
+            original_replace = os.replace
+            def fail_after_active(source, destination, *args, **kwargs):
+                result = original_replace(source, destination, *args, **kwargs)
+                if os.path.abspath(os.fspath(destination)) == active:
+                    raise OSError("injected post-replacement failure")
+                return result
+            os.replace = fail_after_active
+        """)
+        result = self.run_cli("create", "experiment", "--use", extra_environment=fault)
+        self.assert_refused(result)
+        self.assert_empty_set(self.root, "experiment")
+        self.assert_aliases(self.root, "experiment")
+        self.assertFalse(os.path.lexists(self.root / ".skillset-use.staging"))
+
+    def test_create_help_documents_create_options(self):
+        result = self.run_cli("create", "--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--from SOURCE", result.stdout)
+        self.assertIn("clone from an existing skillset", result.stdout)
+        self.assertIn("--use", result.stdout)
 
     def test_create_refuses_regular_and_symlink_target_collisions(self):
         regular_home = self.new_home("regular-collision")
