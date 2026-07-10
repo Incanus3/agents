@@ -62,6 +62,8 @@ Relevant behavior:
 
 The design deliberately does not use `XDG_STATE_HOME` virtualization: that would make direct `npx skills` calls consult
 different metadata from the wrapper and would leave only part of the active state represented by filesystem aliases.
+Delegated `npx skills` processes run with `XDG_STATE_HOME` removed from their child environment so upstream consistently
+uses the managed `~/.agents/.skill-lock.json` alias. This does not modify the user's shell environment.
 
 ## Goals
 
@@ -144,7 +146,8 @@ Commands other than `init` require a valid managed layout. No create, init, or r
 ### Upstream delegation
 
 `skillset skills <arguments...>` delegates to `npx skills <arguments...>` with inherited stdin, stdout, stderr, signals,
-and exit status.
+and exit status. It removes `XDG_STATE_HOME` from the child environment to keep upstream lock operations inside the
+active skillset.
 
 For `add`, `list`/`ls`, `remove`/`rm`, and `update`, the wrapper injects `--global` unless `-g` or `--global` is already
 present. It rejects `-p` and `--project` for these commands. Scope-free commands such as `find`, `use`, and upstream

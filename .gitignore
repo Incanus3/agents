@@ -1,1 +1,3 @@
 .augment/settings.json
+# br doctor per-run artifacts
+.doctor/
