@@ -104,6 +104,11 @@ def validate_layout(root):
     skillsets = root / "skillsets"
     if not real_kind(skillsets, stat.S_ISDIR):
         raise OperationalError("skillsets are not initialized")
+    use_staging = root / ".skillset-use.staging"
+    if lexists(use_staging):
+        raise OperationalError(
+            f"stale active staging path must be recovered: {use_staging}"
+        )
     require_alias(root / "skills", "active/skills")
     require_alias(root / ".skill-lock.json", "active/.skill-lock.json")
     active = root / "active"
@@ -159,7 +164,11 @@ def write_empty_lock(path):
 
 def preflight_init(root, name):
     validate_name(name)
-    for managed in (root / "skillsets", root / "active"):
+    for managed in (
+        root / "skillsets",
+        root / "active",
+        root / ".skillset-use.staging",
+    ):
         if lexists(managed):
             raise OperationalError(f"partial or existing managed layout found at {managed}")
     skills = root / "skills"
@@ -309,6 +318,153 @@ def use(root, name):
         except OSError:
             pass
         raise OperationalError(f"could not activate {name!r}: {error}") from error
+
+
+def canonical_alias(path, target):
+    try:
+        return path.is_symlink() and os.readlink(path) == target
+    except OSError:
+        return False
+
+
+def cleanup_rename_staging(staging, target):
+    if not lexists(staging):
+        return None
+    if not canonical_alias(staging, target):
+        return f"refused to remove noncanonical staging path {staging}"
+    try:
+        staging.unlink()
+    except (Exception, KeyboardInterrupt) as error:
+        if lexists(staging):
+            return f"could not remove canonical staging symlink {staging}: {error}"
+    return None
+
+
+def set_is_valid(root, name):
+    try:
+        validate_set(root, name)
+    except OperationalError:
+        return False
+    return True
+
+
+def incomplete_active_rename(error, old, new, active, problems):
+    details = "; ".join(problems)
+    remaining = [str(path) for path in (old, new) if lexists(path)]
+    location = ", ".join(remaining) if remaining else "neither expected set path"
+    raise OperationalError(
+        f"active rename failed ({error}); recovery could not restore a valid "
+        f"layout ({details}). Remaining set data is at {location}. Preserve it; "
+        f"inspect {old}, {new}, and {active} before moving the set back or "
+        "retargeting active, then run `skillset doctor` when available."
+    ) from error
+
+
+def recover_active_rename(root, old_name, new_name, error):
+    old = set_path(root, old_name)
+    new = set_path(root, new_name)
+    active = root / "active"
+    staging = root / ".skillset-use.staging"
+    old_target = f"skillsets/{old_name}"
+    new_target = f"skillsets/{new_name}"
+    cleanup_problem = cleanup_rename_staging(staging, new_target)
+
+    if canonical_alias(active, new_target) and set_is_valid(root, new_name):
+        if cleanup_problem is not None:
+            incomplete_active_rename(
+                error, old, new, active, [cleanup_problem]
+            )
+        if isinstance(error, KeyboardInterrupt):
+            raise error
+        return
+
+    problems = []
+    if cleanup_problem is not None:
+        problems.append(cleanup_problem)
+    if canonical_alias(active, old_target):
+        if not lexists(old) and set_is_valid(root, new_name):
+            try:
+                os.rename(new, old)
+            except (Exception, KeyboardInterrupt) as rollback_error:
+                problems.append(f"could not roll back {new} to {old}: {rollback_error}")
+        elif not (set_is_valid(root, old_name) and not lexists(new)):
+            problems.append(f"could not safely roll back {new} to {old}")
+
+        rolled_back = (
+            canonical_alias(active, old_target)
+            and set_is_valid(root, old_name)
+            and not lexists(new)
+            and not lexists(staging)
+        )
+        if rolled_back:
+            if isinstance(error, KeyboardInterrupt):
+                raise error
+            raise OperationalError(
+                f"could not rename active skillset {old_name!r} to {new_name!r}; "
+                f"the directory rename was rolled back: {error}"
+            ) from error
+    else:
+        problems.append(f"active alias is not canonical for {old} or {new}: {active}")
+
+    if not problems:
+        problems.append("rollback did not restore the original layout")
+    incomplete_active_rename(error, old, new, active, problems)
+
+
+def rename(root, old_name, new_name):
+    validate_name(old_name)
+    validate_name(new_name)
+    active_name = validate_layout(root)
+    old = validate_set(root, old_name)
+    new = set_path(root, new_name)
+    if lexists(new):
+        raise OperationalError(f"skillset already exists: {new}")
+
+    if old_name != active_name:
+        try:
+            os.rename(old, new)
+        except Exception as error:
+            raise OperationalError(
+                f"could not rename {old_name!r} to {new_name!r}: {error}"
+            ) from error
+        return
+
+    staging = root / ".skillset-use.staging"
+    if lexists(staging):
+        raise OperationalError(f"stale use staging path must be recovered: {staging}")
+    try:
+        os.rename(old, new)
+    except (Exception, KeyboardInterrupt) as error:
+        recover_active_rename(root, old_name, new_name, error)
+        return
+    try:
+        os.symlink(f"skillsets/{new_name}", staging)
+        os.replace(staging, root / "active")
+    except (Exception, KeyboardInterrupt) as error:
+        recover_active_rename(root, old_name, new_name, error)
+
+
+def remove(root, name, confirmed):
+    validate_name(name)
+    active_name = validate_layout(root)
+    target = validate_set(root, name)
+    if name == active_name:
+        raise OperationalError(
+            f"cannot remove active skillset {name!r}; activate another set first"
+        )
+    if not confirmed:
+        print(
+            f"Remove skillset {name!r}? [y/N] ",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+        if sys.stdin.readline().strip().lower() not in {"y", "yes"}:
+            raise OperationalError(f"removal of skillset {name!r} cancelled")
+    try:
+        shutil.rmtree(target)
+    except Exception as error:
+        raise OperationalError(f"could not remove skillset {name!r}: {error}") from error
 
 
 def normalize_scalar(value):
@@ -599,6 +755,12 @@ def parser():
     create_parser.add_argument("--from", dest="source", metavar="SOURCE")
     use_parser = commands.add_parser("use", help="activate a skillset")
     use_parser.add_argument("name")
+    rename_parser = commands.add_parser("rename", help="rename a skillset")
+    rename_parser.add_argument("old")
+    rename_parser.add_argument("new")
+    remove_parser = commands.add_parser("remove", help="remove an inactive skillset")
+    remove_parser.add_argument("name")
+    remove_parser.add_argument("--yes", action="store_true")
     list_parser = commands.add_parser("list", help="list managed skillsets")
     list_parser.add_argument("-v", "--verbose", action="store_true")
     commands.add_parser("current", help="print the active skillset name")
@@ -624,6 +786,10 @@ def main():
                 create(root, arguments.name, arguments.source)
             elif arguments.command == "use":
                 use(root, arguments.name)
+            elif arguments.command == "rename":
+                rename(root, arguments.old, arguments.new)
+            elif arguments.command == "remove":
+                remove(root, arguments.name, arguments.yes)
             elif arguments.command == "list":
                 list_sets(root, arguments.verbose)
             elif arguments.command == "current":

@@ -52,6 +52,48 @@ skillset use experiment
 Activation atomically retargets `~/.agents/active`; the stable `skills` and
 `.skill-lock.json` aliases remain unchanged.
 
+## Rename skillsets
+
+Rename an inactive set without changing the active aliases:
+
+```sh
+skillset rename experiment trial
+```
+
+The active set can be renamed with the same command:
+
+```sh
+skillset rename default baseline
+```
+
+An active rename moves the complete set first and then atomically retargets
+`~/.agents/active`; the stable root aliases remain unchanged. Rename refuses
+any existing destination, including files and symlinks, without overwriting it.
+If active retargeting fails before it commits, the directory rename is rolled
+back. If rollback cannot restore a valid layout, the error names the old, new,
+and active paths and identifies the remaining data location. Preserve that copy
+and inspect the reported state before either moving the set back or retargeting
+`active`; run `skillset doctor` when it is available.
+
+## Remove skillsets
+
+Remove an inactive set with an interactive confirmation:
+
+```text
+$ skillset remove trial
+Remove skillset 'trial'? [y/N] yes
+```
+
+Only `y` or `yes`, ignoring case and surrounding whitespace, confirms removal.
+Use `--yes` for noninteractive operation:
+
+```sh
+skillset remove trial --yes
+```
+
+The active set is always refused, even with `--yes`. Activate another set with
+`skillset use` before removing it.
+
 ## Inspect skillsets
 
 List sets in sorted order. The active set is the only one prefixed with `* `:

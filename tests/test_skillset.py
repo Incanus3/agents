@@ -68,12 +68,14 @@ class SkillsetTests(unittest.TestCase):
         home=None,
         extra_environment=None,
         start_new_session=False,
+        stdin=None,
     ):
         return subprocess.Popen(
             [str(SKILLSET), *arguments],
             cwd=home or self.home,
             env=self.environment(home, extra_environment),
             text=True,
+            stdin=stdin,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=start_new_session,
@@ -160,6 +162,12 @@ class SkillsetTests(unittest.TestCase):
 
         visit(root, Path("."))
         return snapshot
+
+    def tree_contract_snapshot(self, root):
+        return {
+            relative: (metadata[0], metadata[1], metadata[3], metadata[6])
+            for relative, metadata in self.filesystem_snapshot(root).items()
+        }
 
     def assert_invalid_show_entry(self, output, directory, category):
         prefix = f"{directory} — [invalid: "
@@ -262,7 +270,7 @@ class SkillsetTests(unittest.TestCase):
     def assert_refused(self, result):
         self.assertEqual(result.returncode, 1, (result.stdout, result.stderr))
 
-    def test_help_includes_exact_commands_through_bead_three(self):
+    def test_help_includes_exact_supported_commands(self):
         result = self.run_cli("--help")
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -270,7 +278,17 @@ class SkillsetTests(unittest.TestCase):
         self.assertIsNotNone(command_group, result.stdout)
         self.assertEqual(
             set(command_group.group(1).split(",")),
-            {"init", "create", "use", "skills", "list", "current", "show"},
+            {
+                "init",
+                "create",
+                "use",
+                "rename",
+                "remove",
+                "skills",
+                "list",
+                "current",
+                "show",
+            },
         )
 
     def test_list_sorts_set_names_and_marks_only_the_active_set(self):
@@ -945,6 +963,12 @@ class SkillsetTests(unittest.TestCase):
             ("create",),
             ("create", "copy", "--from"),
             ("use",),
+            ("rename",),
+            ("rename", "old"),
+            ("rename", "old", "new", "extra"),
+            ("remove",),
+            ("remove", "default", "extra"),
+            ("remove", "default", "--unknown"),
             ("list", "extra"),
             ("list", "--unknown"),
             ("current", "extra"),
@@ -1072,6 +1096,21 @@ class SkillsetTests(unittest.TestCase):
             with self.subTest(entry=entry):
                 self.assert_refused(result)
                 self.assertTrue(os.path.lexists(root / entry))
+
+    def test_init_rejects_stale_active_staging_without_mutation(self):
+        self.root.mkdir()
+        (self.root / ".skillset.lock").write_text("", encoding="utf-8")
+        staging = self.root / ".skillset-use.staging"
+        staging.write_text("foreign staging data", encoding="utf-8")
+        before = self.tree_contract_snapshot(self.root)
+
+        result = self.run_cli("init", "default")
+
+        self.assert_refused(result)
+        self.assertIn(str(staging), result.stdout + result.stderr)
+        self.assertEqual(self.tree_contract_snapshot(self.root), before)
+        self.assertFalse(os.path.lexists(self.root / "skillsets"))
+        self.assertFalse(os.path.lexists(self.root / "active"))
 
     def test_init_refuses_target_collision_and_reinitialization(self):
         (self.root / "skillsets" / "default").mkdir(parents=True)
@@ -1293,6 +1332,699 @@ class SkillsetTests(unittest.TestCase):
         root_symlinks = {path.name for path in self.root.iterdir() if path.is_symlink()}
         self.assertEqual(root_symlinks, {"active", "skills", ".skill-lock.json"})
         self.assertTrue((Path(root) / "skillsets" / "experiment").is_dir())
+
+    def test_rename_inactive_set_preserves_complete_tree_and_active_alias(self):
+        self.initialize()
+        source = self.make_set(self.root, "old")
+        source.chmod(0o750)
+        nested = source / "skills" / "alpha" / "nested"
+        nested.mkdir(parents=True)
+        nested.chmod(0o711)
+        executable = nested / "tool"
+        executable.write_bytes(b"#!/bin/sh\nprintf preserved\\n\n")
+        executable.chmod(0o751)
+        (nested / "tool-link").symlink_to("tool")
+        lock_bytes = b'{"version":3,"skills":{"alpha":{}},"dismissed":{}}\n'
+        (source / ".skill-lock.json").write_bytes(lock_bytes)
+        expected_tree = self.tree_contract_snapshot(source)
+        source_inode = source.stat().st_ino
+        aliases_before = {
+            name: ((self.root / name).lstat().st_ino, os.readlink(self.root / name))
+            for name in ("active", "skills", ".skill-lock.json")
+        }
+
+        result = self.run_cli("rename", "old", "new")
+
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assertFalse(os.path.lexists(source))
+        destination = self.root / "skillsets" / "new"
+        self.assertEqual(destination.stat().st_ino, source_inode)
+        self.assertEqual(self.tree_contract_snapshot(destination), expected_tree)
+        self.assertEqual(
+            {
+                name: ((self.root / name).lstat().st_ino, os.readlink(self.root / name))
+                for name in aliases_before
+            },
+            aliases_before,
+        )
+
+    def test_rename_active_set_retargets_only_active_and_updates_inspection(self):
+        self.initialize("old")
+        payload = self.root / "skillsets" / "old" / "skills" / "payload.bin"
+        payload.write_bytes(b"active rename payload\x00\xff")
+        stable_aliases = {
+            name: ((self.root / name).lstat().st_ino, os.readlink(self.root / name))
+            for name in ("skills", ".skill-lock.json")
+        }
+
+        result = self.run_cli("rename", "old", "new")
+        current = self.run_cli("current")
+        listed = self.run_cli("list")
+
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assertFalse(os.path.lexists(self.root / "skillsets" / "old"))
+        self.assertEqual(
+            (self.root / "skillsets" / "new" / "skills" / "payload.bin").read_bytes(),
+            b"active rename payload\x00\xff",
+        )
+        self.assertEqual(os.readlink(self.root / "active"), "skillsets/new")
+        for name, identity in stable_aliases.items():
+            self.assertEqual(
+                ((self.root / name).lstat().st_ino, os.readlink(self.root / name)),
+                identity,
+            )
+        self.assertEqual((current.returncode, current.stdout, current.stderr), (0, "new\n", ""))
+        self.assertEqual((listed.returncode, listed.stdout, listed.stderr), (0, "* new\n", ""))
+
+    def test_rename_rejects_missing_source_and_invalid_names_without_mutation(self):
+        self.initialize()
+        self.make_set(self.root, "old")
+        before = self.tree_contract_snapshot(self.root / "skillsets")
+
+        missing = self.run_cli("rename", "missing", "new")
+        self.assert_refused(missing)
+        invalid_cases = (
+            ("../escape", "new"),
+            ("Upper", "new"),
+            ("old", "../escape"),
+            ("old", ".hidden"),
+            ("old", "two words"),
+        )
+        for old, new in invalid_cases:
+            with self.subTest(old=old, new=new):
+                result = self.run_cli("rename", old, new)
+                self.assert_refused(result)
+        self.assertEqual(
+            self.tree_contract_snapshot(self.root / "skillsets"), before
+        )
+        self.assertEqual(os.readlink(self.root / "active"), "skillsets/default")
+
+    def test_rename_refuses_directory_file_and_symlink_collisions_without_overwrite(self):
+        for index, kind in enumerate(("directory", "file", "symlink")):
+            home = self.new_home(f"rename-collision-{index}")
+            root = self.make_managed_layout(home)
+            source = self.make_set(root, "old")
+            (source / "skills" / "source-marker").write_bytes(b"source")
+            destination = root / "skillsets" / "new"
+            external = home / "external-target"
+            if kind == "directory":
+                target = self.make_set(root, "new")
+                (target / "skills" / "keep").write_bytes(b"directory target")
+            elif kind == "file":
+                destination.write_bytes(b"file target")
+            else:
+                external.mkdir()
+                (external / "keep").write_bytes(b"symlink target")
+                destination.symlink_to(external, target_is_directory=True)
+            source_before = self.tree_contract_snapshot(source)
+            target_before = self.tree_contract_snapshot(destination)
+            external_before = (
+                self.tree_contract_snapshot(external) if external.exists() else None
+            )
+
+            with self.subTest(kind=kind):
+                result = self.run_cli("rename", "old", "new", home=home)
+                self.assert_refused(result)
+                self.assertEqual(self.tree_contract_snapshot(source), source_before)
+                self.assertEqual(
+                    self.tree_contract_snapshot(destination), target_before
+                )
+                if external_before is not None:
+                    self.assertEqual(
+                        self.tree_contract_snapshot(external), external_before
+                    )
+
+    def test_rename_and_remove_refuse_uninitialized_and_invalid_layouts(self):
+        for index, arguments in enumerate(
+            (("rename", "old", "new"), ("remove", "old", "--yes"))
+        ):
+            home = self.new_home(f"lifecycle-uninitialized-{index}")
+            result = self.run_cli(*arguments, home=home)
+            with self.subTest(layout="uninitialized", command=arguments[0]):
+                self.assert_refused(result)
+
+        root = self.make_managed_layout(self.new_home("lifecycle-invalid"))
+        (root / ".skillset.lock").write_text("", encoding="utf-8")
+        self.make_set(root, "old")
+        (root / "skills").unlink()
+        (root / "skills").symlink_to("skillsets/default/skills")
+        before = self.tree_contract_snapshot(root)
+        for arguments in (("rename", "old", "new"), ("remove", "old", "--yes")):
+            with self.subTest(layout="invalid", command=arguments[0]):
+                result = self.run_cli(*arguments, home=root.parent)
+                self.assert_refused(result)
+                self.assertNotIn("Remove skillset", result.stderr)
+                self.assertEqual(self.tree_contract_snapshot(root), before)
+
+    def test_lifecycle_paths_refuse_source_symlinks_and_cannot_escape_skillsets(self):
+        home = self.new_home("lifecycle-containment")
+        root = self.make_managed_layout(home)
+        external_set = home / "external-set"
+        (external_set / "skills").mkdir(parents=True)
+        self.write_lock(external_set / ".skill-lock.json")
+        external_marker = external_set / "skills" / "keep"
+        external_marker.write_bytes(b"external set untouched")
+        (root / "skillsets" / "linked").symlink_to(
+            external_set, target_is_directory=True
+        )
+        outside = root / "escape"
+        outside.mkdir()
+        outside_marker = outside / "keep"
+        outside_marker.write_bytes(b"outside untouched")
+        external_before = self.tree_contract_snapshot(external_set)
+        outside_before = self.tree_contract_snapshot(outside)
+
+        symlink_cases = (
+            ("rename", "linked", "new"),
+            ("remove", "linked", "--yes"),
+        )
+        for arguments in symlink_cases:
+            with self.subTest(arguments=arguments):
+                result = self.run_cli(*arguments, home=home)
+                self.assert_refused(result)
+                self.assertNotIn("Remove skillset", result.stderr)
+                self.assertEqual(
+                    self.tree_contract_snapshot(external_set), external_before
+                )
+        self.assertTrue((root / "skillsets" / "linked").is_symlink())
+        (root / "skillsets" / "linked").unlink()
+
+        traversal_cases = (
+            ("rename", "../escape", "new"),
+            ("rename", "default", "../escape"),
+            ("remove", "../escape", "--yes"),
+        )
+        for arguments in traversal_cases:
+            with self.subTest(arguments=arguments):
+                result = self.run_cli(*arguments, home=home)
+                self.assert_refused(result)
+                self.assertNotIn("Remove skillset", result.stderr)
+                self.assertEqual(
+                    self.tree_contract_snapshot(external_set), external_before
+                )
+                self.assertEqual(self.tree_contract_snapshot(outside), outside_before)
+
+    def test_lifecycle_operations_refuse_stale_active_staging_without_mutation(self):
+        cases = (
+            ("inactive-rename", ("rename", "old", "new")),
+            ("active-rename", ("rename", "default", "renamed")),
+            ("remove", ("remove", "victim", "--yes")),
+        )
+        for index, (label, arguments) in enumerate(cases):
+            home = self.new_home(f"lifecycle-stale-{index}")
+            root = self.make_managed_layout(home)
+            (root / ".skillset.lock").write_text("", encoding="utf-8")
+            self.make_set(root, "old")
+            self.make_set(root, "victim")
+            staging = root / ".skillset-use.staging"
+            staging.write_text("foreign staging data", encoding="utf-8")
+            before = self.tree_contract_snapshot(root)
+
+            with self.subTest(label=label):
+                result = self.run_cli(*arguments, home=home)
+                self.assert_refused(result)
+                self.assertIn(str(staging), result.stdout + result.stderr)
+                self.assertNotIn("Remove skillset", result.stderr)
+                self.assertEqual(self.tree_contract_snapshot(root), before)
+
+    def test_active_rename_retarget_failure_rolls_directory_back_and_cleans_staging(self):
+        self.initialize("old")
+        payload = self.root / "skillsets" / "old" / "skills" / "keep"
+        payload.write_bytes(b"recoverable payload")
+        old = str(self.root / "skillsets" / "old")
+        new = str(self.root / "skillsets" / "new")
+        active = str(self.root / "active")
+        staging = self.root / ".skillset-use.staging"
+        reached = self.sandbox / "rename-retarget-reached"
+        fault = self.fault_environment(
+            f"""
+            import os
+            from pathlib import Path
+            old = {old!r}
+            new = {new!r}
+            active = {active!r}
+            reached = Path({str(reached)!r})
+            original_replace = os.replace
+            def fail_active(source, destination, *args, **kwargs):
+                if os.path.abspath(os.fspath(destination)) == active:
+                    if os.path.lexists(old) or not os.path.isdir(new):
+                        raise AssertionError("active retarget preceded directory rename")
+                    reached.write_text(os.fspath(source), encoding="utf-8")
+                    raise OSError("injected active retarget failure")
+                return original_replace(source, destination, *args, **kwargs)
+            os.replace = fail_active
+            """
+        )
+
+        result = self.run_cli("rename", "old", "new", extra_environment=fault)
+
+        self.assert_refused(result)
+        self.assertTrue(reached.exists(), "active retarget was not attempted")
+        self.assertEqual(Path(reached.read_text(encoding="utf-8")), staging)
+        self.assertEqual(payload.read_bytes(), b"recoverable payload")
+        self.assertFalse(os.path.lexists(self.root / "skillsets" / "new"))
+        self.assertEqual(os.readlink(self.root / "active"), "skillsets/old")
+        self.assertFalse(os.path.lexists(staging))
+
+    def test_active_rename_keyboard_interrupt_before_replacement_rolls_back(self):
+        self.initialize("old")
+        payload = self.root / "skillsets" / "old" / "skills" / "keep"
+        payload.write_bytes(b"interrupt payload")
+        old = str(self.root / "skillsets" / "old")
+        new = str(self.root / "skillsets" / "new")
+        active = str(self.root / "active")
+        staging = self.root / ".skillset-use.staging"
+        reached = self.sandbox / "rename-interrupt-reached"
+        fault = self.fault_environment(
+            f"""
+            import os
+            from pathlib import Path
+            old = {old!r}
+            new = {new!r}
+            active = {active!r}
+            reached = Path({str(reached)!r})
+            original_replace = os.replace
+            def interrupt_active(source, destination, *args, **kwargs):
+                if os.path.abspath(os.fspath(destination)) == active:
+                    if os.path.lexists(old) or not os.path.isdir(new):
+                        raise AssertionError("active retarget preceded directory rename")
+                    reached.write_text(os.fspath(source), encoding="utf-8")
+                    raise KeyboardInterrupt
+                return original_replace(source, destination, *args, **kwargs)
+            os.replace = interrupt_active
+            """
+        )
+
+        result = self.run_cli("rename", "old", "new", extra_environment=fault)
+
+        self.assertEqual(result.returncode, 130, (result.stdout, result.stderr))
+        self.assertTrue(reached.exists(), "active retarget was not attempted")
+        self.assertEqual(Path(reached.read_text(encoding="utf-8")), staging)
+        self.assertEqual(payload.read_bytes(), b"interrupt payload")
+        self.assertFalse(os.path.lexists(self.root / "skillsets" / "new"))
+        self.assertEqual(os.readlink(self.root / "active"), "skillsets/old")
+        self.assertFalse(os.path.lexists(staging))
+
+    def test_active_rename_keyboard_interrupt_after_directory_move_rolls_back(self):
+        self.initialize("old")
+        payload = self.root / "skillsets" / "old" / "skills" / "keep"
+        payload.write_bytes(b"post-move interrupt payload")
+        old = str(self.root / "skillsets" / "old")
+        new = str(self.root / "skillsets" / "new")
+        moved = self.sandbox / "rename-directory-moved"
+        fault = self.fault_environment(
+            f"""
+            import os
+            from pathlib import Path
+            old = {old!r}
+            new = {new!r}
+            moved = Path({str(moved)!r})
+            original_rename = os.rename
+            interrupted = False
+            def interrupt_after_move(source, destination, *args, **kwargs):
+                global interrupted
+                pair = (os.path.abspath(os.fspath(source)),
+                        os.path.abspath(os.fspath(destination)))
+                result = original_rename(source, destination, *args, **kwargs)
+                if pair == (old, new) and not interrupted:
+                    interrupted = True
+                    moved.write_text("moved", encoding="utf-8")
+                    raise KeyboardInterrupt
+                return result
+            os.rename = interrupt_after_move
+            """
+        )
+
+        result = self.run_cli("rename", "old", "new", extra_environment=fault)
+
+        self.assertEqual(result.returncode, 130, (result.stdout, result.stderr))
+        self.assertTrue(moved.exists(), "directory rename was not reached")
+        self.assertTrue(payload.is_file(), "active directory rename was not rolled back")
+        self.assertEqual(payload.read_bytes(), b"post-move interrupt payload")
+        self.assertFalse(os.path.lexists(self.root / "skillsets" / "new"))
+        self.assertEqual(os.readlink(self.root / "active"), "skillsets/old")
+        self.assertFalse(os.path.lexists(self.root / ".skillset-use.staging"))
+
+    def test_active_rename_rollback_failure_reports_paths_and_preserves_staged_data(self):
+        self.initialize("old")
+        old = self.root / "skillsets" / "old"
+        new = self.root / "skillsets" / "new"
+        active = self.root / "active"
+        (old / "skills" / "only-copy").write_bytes(b"only staged copy")
+        expected_tree = self.tree_contract_snapshot(old)
+        fault = self.fault_environment(
+            f"""
+            import os
+            old = {str(old)!r}
+            new = {str(new)!r}
+            active = {str(active)!r}
+            renamed = False
+            original_rename = os.rename
+            original_replace = os.replace
+            def paths(source, destination):
+                return (os.path.abspath(os.fspath(source)),
+                        os.path.abspath(os.fspath(destination)))
+            def injected_rename(source, destination, *args, **kwargs):
+                global renamed
+                pair = paths(source, destination)
+                if renamed and pair == (new, old):
+                    raise OSError("injected rollback failure")
+                result = original_rename(source, destination, *args, **kwargs)
+                if pair == (old, new):
+                    renamed = True
+                return result
+            def injected_replace(source, destination, *args, **kwargs):
+                global renamed
+                pair = paths(source, destination)
+                if pair[1] == active:
+                    raise OSError("injected active retarget failure")
+                if renamed and pair == (new, old):
+                    raise OSError("injected rollback failure")
+                result = original_replace(source, destination, *args, **kwargs)
+                if pair == (old, new):
+                    renamed = True
+                return result
+            os.rename = injected_rename
+            os.replace = injected_replace
+            """
+        )
+
+        result = self.run_cli("rename", "old", "new", extra_environment=fault)
+
+        self.assert_refused(result)
+        report = result.stdout + result.stderr
+        for path in (old, new, active):
+            self.assertIn(str(path), report)
+        self.assertIn("doctor", report.lower())
+        self.assertFalse(os.path.lexists(old))
+        self.assertEqual(self.tree_contract_snapshot(new), expected_tree)
+        self.assertEqual(os.readlink(active), "skillsets/old")
+        self.assertFalse(os.path.lexists(self.root / ".skillset-use.staging"))
+
+    def test_active_rename_failure_after_replace_leaves_valid_committed_layout(self):
+        self.initialize("old")
+        payload = self.root / "skillsets" / "old" / "skills" / "only-copy"
+        payload.write_bytes(b"committed payload")
+        active = str(self.root / "active")
+        staging = self.root / ".skillset-use.staging"
+        replaced = self.sandbox / "rename-active-replaced"
+        fault = self.fault_environment(
+            f"""
+            import os
+            from pathlib import Path
+            active = {active!r}
+            replaced = Path({str(replaced)!r})
+            original_replace = os.replace
+            def fail_after_active_replace(source, destination, *args, **kwargs):
+                result = original_replace(source, destination, *args, **kwargs)
+                if os.path.abspath(os.fspath(destination)) == active:
+                    replaced.write_text(os.fspath(source), encoding="utf-8")
+                    raise OSError("injected post-replace failure")
+                return result
+            os.replace = fail_after_active_replace
+            """
+        )
+
+        result = self.run_cli("rename", "old", "new", extra_environment=fault)
+
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assertTrue(replaced.exists(), "active replacement was not reached")
+        self.assertEqual(Path(replaced.read_text(encoding="utf-8")), staging)
+        self.assertFalse(os.path.lexists(self.root / "skillsets" / "old"))
+        self.assertEqual(
+            (self.root / "skillsets" / "new" / "skills" / "only-copy").read_bytes(),
+            b"committed payload",
+        )
+        self.assertEqual(os.readlink(self.root / "active"), "skillsets/new")
+        self.assertFalse(os.path.lexists(staging))
+        current = self.run_cli("current")
+        listed = self.run_cli("list")
+        self.assertEqual((current.returncode, current.stdout), (0, "new\n"))
+        self.assertEqual((listed.returncode, listed.stdout), (0, "* new\n"))
+
+    def test_active_rename_keyboard_interrupt_after_replace_keeps_committed_layout(self):
+        self.initialize("old")
+        payload = self.root / "skillsets" / "old" / "skills" / "only-copy"
+        payload.write_bytes(b"interrupt committed payload")
+        active = str(self.root / "active")
+        replaced = self.sandbox / "rename-active-interrupted-after-replace"
+        fault = self.fault_environment(
+            f"""
+            import os
+            from pathlib import Path
+            active = {active!r}
+            replaced = Path({str(replaced)!r})
+            original_replace = os.replace
+            def interrupt_after_active_replace(source, destination, *args, **kwargs):
+                result = original_replace(source, destination, *args, **kwargs)
+                if os.path.abspath(os.fspath(destination)) == active:
+                    replaced.write_text("replaced", encoding="utf-8")
+                    raise KeyboardInterrupt
+                return result
+            os.replace = interrupt_after_active_replace
+            """
+        )
+
+        result = self.run_cli("rename", "old", "new", extra_environment=fault)
+
+        self.assertEqual(result.returncode, 130, (result.stdout, result.stderr))
+        self.assertTrue(replaced.exists(), "active replacement was not reached")
+        self.assertFalse(os.path.lexists(self.root / "skillsets" / "old"))
+        self.assertEqual(
+            (self.root / "skillsets" / "new" / "skills" / "only-copy").read_bytes(),
+            b"interrupt committed payload",
+        )
+        self.assertEqual(os.readlink(self.root / "active"), "skillsets/new")
+        self.assertFalse(os.path.lexists(self.root / ".skillset-use.staging"))
+        current = self.run_cli("current")
+        self.assertEqual((current.returncode, current.stdout), (0, "new\n"))
+
+    def test_remove_prompt_is_exact_and_accepts_case_insensitive_y_or_yes(self):
+        prompt = "Remove skillset 'victim'? [y/N] "
+        for index, response in enumerate(("y\n", "Y\n", "yes\n", "YeS\n")):
+            home = self.new_home(f"remove-confirm-{index}")
+            root = self.make_managed_layout(home)
+            victim = self.make_set(root, "victim")
+            (victim / "skills" / "keep").write_bytes(b"removed")
+
+            with self.subTest(response=response.strip()):
+                result = self.run_cli(
+                    "remove", "victim", home=home, input_text=response
+                )
+                self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+                self.assertEqual(result.stderr, prompt)
+                self.assertFalse(os.path.lexists(victim))
+
+    def test_remove_yes_skips_prompt(self):
+        self.initialize()
+        victim = self.make_set(self.root, "victim")
+
+        result = self.run_cli("remove", "victim", "--yes")
+
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assertNotIn("Remove skillset", result.stderr)
+        self.assertFalse(os.path.lexists(victim))
+
+    def test_remove_decline_empty_invalid_and_eof_cancel_without_mutation(self):
+        cases = (("decline", "n\n"), ("empty", "\n"), ("invalid", "maybe\n"), ("eof", ""))
+        prompt = "Remove skillset 'victim'? [y/N] "
+        for index, (label, response) in enumerate(cases):
+            home = self.new_home(f"remove-cancel-{index}")
+            root = self.make_managed_layout(home)
+            victim = self.make_set(root, "victim")
+            nested = victim / "skills" / "nested"
+            nested.mkdir()
+            (nested / "keep").write_bytes(b"preserved")
+            before = self.tree_contract_snapshot(victim)
+
+            with self.subTest(label=label):
+                result = self.run_cli(
+                    "remove", "victim", home=home, input_text=response
+                )
+                self.assert_refused(result)
+                self.assertTrue(result.stderr.startswith(prompt), result.stderr)
+                self.assertIn("cancelled", (result.stdout + result.stderr).lower())
+                self.assertEqual(self.tree_contract_snapshot(victim), before)
+
+    def test_remove_rejects_active_set_before_prompt_even_with_yes(self):
+        self.initialize("active-set")
+        active = self.root / "skillsets" / "active-set"
+        before = self.tree_contract_snapshot(active)
+        cases = (("remove", "active-set"), ("remove", "active-set", "--yes"))
+
+        for arguments in cases:
+            with self.subTest(arguments=arguments):
+                result = self.run_cli(*arguments, input_text="yes\n")
+                self.assert_refused(result)
+                self.assertNotIn("Remove skillset", result.stderr)
+                self.assertEqual(self.tree_contract_snapshot(active), before)
+
+    def test_remove_refuses_missing_invalid_symlink_and_invalid_layout_before_prompt(self):
+        prompt = "Remove skillset"
+        self.initialize()
+        victim = self.make_set(self.root, "victim")
+        before = self.tree_contract_snapshot(victim)
+        for name in ("missing", "../escape", "Upper", ".hidden", "two words"):
+            with self.subTest(case="name", name=name):
+                result = self.run_cli("remove", name, input_text="yes\n")
+                self.assert_refused(result)
+                self.assertNotIn(prompt, result.stderr)
+                self.assertEqual(self.tree_contract_snapshot(victim), before)
+
+        symlink_home = self.new_home("remove-symlink")
+        symlink_root = self.make_managed_layout(symlink_home)
+        external = symlink_home / "external"
+        (external / "skills").mkdir(parents=True)
+        self.write_lock(external / ".skill-lock.json")
+        marker = external / "skills" / "keep"
+        marker.write_bytes(b"external")
+        (symlink_root / "skillsets" / "linked").symlink_to(
+            external, target_is_directory=True
+        )
+        external_before = self.tree_contract_snapshot(external)
+        result = self.run_cli(
+            "remove", "linked", home=symlink_home, input_text="yes\n"
+        )
+        self.assert_refused(result)
+        self.assertNotIn(prompt, result.stderr)
+        self.assertEqual(self.tree_contract_snapshot(external), external_before)
+        self.assertTrue((symlink_root / "skillsets" / "linked").is_symlink())
+
+        invalid_home = self.new_home("remove-invalid-layout")
+        invalid_root = self.make_managed_layout(invalid_home)
+        invalid_victim = self.make_set(invalid_root, "victim")
+        (invalid_root / ".skill-lock.json").unlink()
+        (invalid_root / ".skill-lock.json").symlink_to(
+            "skillsets/default/.skill-lock.json"
+        )
+        invalid_before = self.tree_contract_snapshot(invalid_victim)
+        result = self.run_cli(
+            "remove", "victim", home=invalid_home, input_text="yes\n"
+        )
+        self.assert_refused(result)
+        self.assertNotIn(prompt, result.stderr)
+        self.assertEqual(self.tree_contract_snapshot(invalid_victim), invalid_before)
+
+    def test_remove_nested_tree_succeeds_without_following_external_links(self):
+        self.initialize()
+        victim = self.make_set(self.root, "victim")
+        nested = victim / "skills" / "alpha" / "one" / "two"
+        nested.mkdir(parents=True)
+        (nested / "payload").write_bytes(b"nested payload")
+        external = self.home / "external-tree"
+        external.mkdir()
+        marker = external / "keep"
+        marker.write_bytes(b"must survive")
+        (victim / "skills" / "external-link").symlink_to(
+            external, target_is_directory=True
+        )
+        external_before = self.tree_contract_snapshot(external)
+
+        result = self.run_cli("remove", "victim", "--yes")
+
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assertFalse(os.path.lexists(victim))
+        self.assertEqual(self.tree_contract_snapshot(external), external_before)
+
+    def test_rename_and_remove_wait_for_advisory_lock_with_markers(self):
+        self.initialize()
+        self.make_set(self.root, "old")
+        self.make_set(self.root, "victim")
+        cases = (("rename", "old", "new"), ("remove", "victim", "--yes"))
+        lock_path = self.root / ".skillset.lock"
+
+        for index, arguments in enumerate(cases):
+            attempted = self.sandbox / f"lifecycle-lock-attempted-{index}"
+            fault = self.fault_environment(
+                f"""
+                import fcntl
+                from pathlib import Path
+                marker = Path({str(attempted)!r})
+                original_flock = fcntl.flock
+                def marked_flock(file, operation):
+                    if operation & fcntl.LOCK_EX:
+                        marker.write_text("attempted", encoding="utf-8")
+                    return original_flock(file, operation)
+                fcntl.flock = marked_flock
+                """
+            )
+            process = None
+            with self.subTest(command=arguments[0]):
+                with lock_path.open("a+") as lock_file:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX)
+                    process = self.popen_cli(
+                        *arguments, extra_environment=fault
+                    )
+                    try:
+                        self.wait_for_path(attempted, process)
+                        self.assertIsNone(
+                            process.poll(), f"{arguments} did not wait for lock"
+                        )
+                    finally:
+                        fcntl.flock(lock_file, fcntl.LOCK_UN)
+                try:
+                    stdout, stderr = process.communicate(timeout=5)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.communicate(timeout=2)
+                self.assertEqual(process.returncode, 0, (stdout, stderr))
+
+    def test_remove_confirmation_waits_while_holding_advisory_lock(self):
+        self.initialize()
+        victim = self.make_set(self.root, "victim")
+        lock_acquired = self.sandbox / "remove-confirm-lock-acquired"
+        input_started = self.sandbox / "remove-confirm-input-started"
+        fault = self.fault_environment(
+            f"""
+            import fcntl
+            import sys
+            from pathlib import Path
+            acquired = Path({str(lock_acquired)!r})
+            reading = Path({str(input_started)!r})
+            original_flock = fcntl.flock
+            def marked_flock(file, operation):
+                result = original_flock(file, operation)
+                if operation & fcntl.LOCK_EX:
+                    acquired.write_text("acquired", encoding="utf-8")
+                return result
+            class MarkedInput:
+                def __init__(self, wrapped):
+                    self.wrapped = wrapped
+                def __getattr__(self, name):
+                    return getattr(self.wrapped, name)
+                def read(self, *args, **kwargs):
+                    reading.write_text("read", encoding="utf-8")
+                    return self.wrapped.read(*args, **kwargs)
+                def readline(self, *args, **kwargs):
+                    reading.write_text("readline", encoding="utf-8")
+                    return self.wrapped.readline(*args, **kwargs)
+            fcntl.flock = marked_flock
+            sys.stdin = MarkedInput(sys.stdin)
+            """
+        )
+        process = self.popen_cli(
+            "remove",
+            "victim",
+            extra_environment=fault,
+            stdin=subprocess.PIPE,
+        )
+        try:
+            self.wait_for_path(input_started, process)
+            self.assertTrue(lock_acquired.exists(), "confirmation began before locking")
+            self.assertIsNone(process.poll(), "confirmation did not wait for input")
+            with (self.root / ".skillset.lock").open("a+") as probe:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            stdout, stderr = process.communicate("yes\n", timeout=5)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=2)
+
+        self.assertEqual(process.returncode, 0, (stdout, stderr))
+        self.assertEqual(stderr, "Remove skillset 'victim'? [y/N] ")
+        self.assertFalse(os.path.lexists(victim))
 
     def test_every_management_operation_waits_for_advisory_lock(self):
         self.root.mkdir()
