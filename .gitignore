@@ -1,3 +1,8 @@
 .augment/settings.json
 # br doctor per-run artifacts
 .doctor/
+
+# skillset runtime artifacts
+.skillset.lock
+.skillset-use.staging
+skillsets/.skillset-create-*.staging

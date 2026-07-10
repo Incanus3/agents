@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+"""Manage named global agent skillsets."""
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import shutil
+import stat
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+
+
+EMPTY_LOCK = {"version": 3, "skills": {}, "dismissed": {}}
+NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
+
+
+class OperationalError(Exception):
+    """A user-correctable filesystem or validation failure."""
+
+
+class SkillsetArgumentParser(argparse.ArgumentParser):
+    """Let domain validation handle option-like skillset names."""
+
+    def _parse_optional(self, argument):
+        parsed = super()._parse_optional(argument)
+        if parsed is not None:
+            candidates = parsed if isinstance(parsed, list) else [parsed]
+            if candidates and all(candidate[0] is None for candidate in candidates):
+                return None
+        return parsed
+
+
+def lexists(path):
+    return os.path.lexists(path)
+
+
+def real_kind(path, expected):
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        return False
+    if stat.S_ISLNK(mode):
+        return False
+    return expected(mode)
+
+
+def validate_name(name):
+    if not NAME_PATTERN.fullmatch(name):
+        raise OperationalError(
+            f"invalid skillset name {name!r}; use lowercase letters, digits, '_' or '-'"
+        )
+
+
+def set_path(root, name):
+    validate_name(name)
+    path = root / "skillsets" / name
+    if path.parent != root / "skillsets":
+        raise OperationalError(f"unsafe skillset path for {name!r}")
+    return path
+
+
+def validate_lockfile(path):
+    if not real_kind(path, stat.S_ISREG):
+        raise OperationalError(f"lockfile must be a real regular file: {path}")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise OperationalError(f"invalid lockfile {path}: {error}") from error
+    valid = (
+        isinstance(value, dict)
+        and type(value.get("version")) is int
+        and value.get("version") == 3
+        and isinstance(value.get("skills"), dict)
+        and isinstance(value.get("dismissed"), dict)
+    )
+    if not valid:
+        raise OperationalError(f"lockfile is not a version-3 global lockfile: {path}")
+
+
+def validate_set(root, name):
+    path = set_path(root, name)
+    if not real_kind(path, stat.S_ISDIR):
+        raise OperationalError(f"skillset must be a real directory: {path}")
+    skills = path / "skills"
+    if not real_kind(skills, stat.S_ISDIR):
+        raise OperationalError(f"skills must be a real directory: {skills}")
+    validate_lockfile(path / ".skill-lock.json")
+    return path
+
+
+def require_alias(path, target):
+    if not path.is_symlink() or os.readlink(path) != target:
+        raise OperationalError(f"managed alias must be {path} -> {target}")
+
+
+def validate_layout(root):
+    skillsets = root / "skillsets"
+    if not real_kind(skillsets, stat.S_ISDIR):
+        raise OperationalError("skillsets are not initialized")
+    require_alias(root / "skills", "active/skills")
+    require_alias(root / ".skill-lock.json", "active/.skill-lock.json")
+    active = root / "active"
+    if not active.is_symlink():
+        raise OperationalError(f"managed alias is missing or invalid: {active}")
+    target = os.readlink(active)
+    if not target.startswith("skillsets/"):
+        raise OperationalError(f"active alias has a noncanonical target: {target}")
+    active_name = target[len("skillsets/") :]
+    validate_name(active_name)
+    if target != f"skillsets/{active_name}":
+        raise OperationalError(f"active alias has a noncanonical target: {target}")
+    validate_set(root, active_name)
+    for entry in skillsets.iterdir():
+        if entry.name.startswith(".skillset-create-") and entry.name.endswith(
+            ".staging"
+        ):
+            raise OperationalError(
+                f"stale create staging path must be recovered: {entry}"
+            )
+        validate_name(entry.name)
+        validate_set(root, entry.name)
+    return active_name
+
+
+@contextmanager
+def operation_lock(root):
+    if lexists(root) and not real_kind(root, stat.S_ISDIR):
+        raise OperationalError(f"managed root must be a real directory: {root}")
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / ".skillset.lock"
+    if lexists(lock_path) and not real_kind(lock_path, stat.S_ISREG):
+        raise OperationalError(f"advisory lock must be a real file: {lock_path}")
+    with lock_path.open("a+") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def write_empty_lock(path):
+    with path.open("x", encoding="utf-8") as handle:
+        json.dump(EMPTY_LOCK, handle)
+        handle.write("\n")
+
+
+def preflight_init(root, name):
+    validate_name(name)
+    for managed in (root / "skillsets", root / "active"):
+        if lexists(managed):
+            raise OperationalError(f"partial or existing managed layout found at {managed}")
+    skills = root / "skills"
+    lockfile = root / ".skill-lock.json"
+    if lexists(skills) and not real_kind(skills, stat.S_ISDIR):
+        raise OperationalError(f"existing skills must be a real directory: {skills}")
+    if lexists(lockfile):
+        validate_lockfile(lockfile)
+    return lexists(skills), lexists(lockfile)
+
+
+def rollback_init(root, target, had_skills, had_lock, aliases):
+    problems = []
+    for alias, expected_target in reversed(aliases):
+        try:
+            if alias.is_symlink() and os.readlink(alias) == expected_target:
+                alias.unlink()
+            elif lexists(alias):
+                raise OSError(f"unexpected entry blocks rollback at {alias}")
+        except Exception as error:
+            problems.append(f"could not remove {alias}: {error}")
+
+    pairs = (
+        (had_skills, target / "skills", root / "skills", "directory"),
+        (had_lock, target / ".skill-lock.json", root / ".skill-lock.json", "file"),
+    )
+    for existed, staged, original, kind in pairs:
+        try:
+            if existed:
+                if not lexists(original) and lexists(staged):
+                    shutil.move(os.fspath(staged), os.fspath(original))
+                elif not lexists(original):
+                    raise OSError(f"both original and staged {kind} are missing")
+                elif lexists(staged):
+                    raise OSError(f"both original and staged {kind} exist")
+            elif lexists(staged):
+                if kind == "directory":
+                    shutil.rmtree(staged)
+                else:
+                    staged.unlink()
+        except Exception as error:
+            problems.append(f"could not restore {original}: {error}")
+
+    for directory in (target, root / "skillsets"):
+        try:
+            if lexists(directory):
+                directory.rmdir()
+        except Exception as error:
+            problems.append(f"could not remove {directory}: {error}")
+    return problems
+
+
+def init(root, name):
+    had_skills, had_lock = preflight_init(root, name)
+    skillsets = root / "skillsets"
+    target = set_path(root, name)
+    aliases = []
+    try:
+        skillsets.mkdir()
+        target.mkdir()
+        if had_skills:
+            shutil.move(os.fspath(root / "skills"), os.fspath(target / "skills"))
+        else:
+            (target / "skills").mkdir()
+        if had_lock:
+            shutil.move(
+                os.fspath(root / ".skill-lock.json"),
+                os.fspath(target / ".skill-lock.json"),
+            )
+        else:
+            write_empty_lock(target / ".skill-lock.json")
+        for path, link_target in (
+            (root / "active", f"skillsets/{name}"),
+            (root / "skills", "active/skills"),
+            (root / ".skill-lock.json", "active/.skill-lock.json"),
+        ):
+            aliases.append((path, link_target))
+            os.symlink(link_target, path)
+    except (Exception, KeyboardInterrupt) as error:
+        rollback_problems = rollback_init(root, target, had_skills, had_lock, aliases)
+        if rollback_problems:
+            details = "; ".join(rollback_problems)
+            raise OperationalError(
+                f"initialization failed ({error}); rollback was incomplete ({details}). "
+                f"Inspect original paths {root / 'skills'} and "
+                f"{root / '.skill-lock.json'} plus staged set {target}; "
+                "restore any missing original from its staged counterpart."
+            ) from error
+        if isinstance(error, KeyboardInterrupt):
+            raise
+        raise OperationalError(f"initialization failed and was rolled back: {error}") from error
+
+
+def create(root, name, source):
+    validate_name(name)
+    if source is not None:
+        validate_name(source)
+    validate_layout(root)
+    destination = set_path(root, name)
+    staging = root / "skillsets" / f".skillset-create-{name}.staging"
+    if lexists(destination):
+        raise OperationalError(f"skillset already exists: {destination}")
+    if lexists(staging):
+        raise OperationalError(f"stale create staging path must be recovered: {staging}")
+    source_path = validate_set(root, source) if source is not None else None
+    try:
+        staging.mkdir()
+        if source_path is None:
+            (staging / "skills").mkdir()
+            write_empty_lock(staging / ".skill-lock.json")
+        else:
+            shutil.copytree(
+                source_path / "skills",
+                staging / "skills",
+                symlinks=True,
+                copy_function=shutil.copy2,
+            )
+            shutil.copy2(
+                source_path / ".skill-lock.json", staging / ".skill-lock.json"
+            )
+        if lexists(destination):
+            raise OperationalError(f"skillset appeared during creation: {destination}")
+        os.rename(staging, destination)
+    except OperationalError:
+        raise
+    except Exception as error:
+        raise OperationalError(
+            f"could not create {name!r}; staging was retained at {staging}: {error}"
+        ) from error
+
+
+def use(root, name):
+    validate_name(name)
+    validate_layout(root)
+    validate_set(root, name)
+    active = root / "active"
+    staging = root / ".skillset-use.staging"
+    if lexists(staging):
+        raise OperationalError(f"stale use staging path must be recovered: {staging}")
+    try:
+        os.symlink(f"skillsets/{name}", staging)
+        os.replace(staging, active)
+    except Exception as error:
+        try:
+            if lexists(staging):
+                staging.unlink()
+        except OSError:
+            pass
+        raise OperationalError(f"could not activate {name!r}: {error}") from error
+
+
+def parser():
+    command_parser = SkillsetArgumentParser(prog="skillset")
+    commands = command_parser.add_subparsers(dest="command", required=True)
+    init_parser = commands.add_parser("init", help="adopt existing global skills")
+    init_parser.add_argument("name")
+    create_parser = commands.add_parser("create", help="create an inactive skillset")
+    create_parser.add_argument("name")
+    create_parser.add_argument("--from", dest="source", metavar="SOURCE")
+    use_parser = commands.add_parser("use", help="activate a skillset")
+    use_parser.add_argument("name")
+    return command_parser
+
+
+def main():
+    arguments = parser().parse_args()
+    root = Path.home() / ".agents"
+    try:
+        with operation_lock(root):
+            if arguments.command == "init":
+                init(root, arguments.name)
+            elif arguments.command == "create":
+                create(root, arguments.name, arguments.source)
+            else:
+                use(root, arguments.name)
+    except OperationalError as error:
+        print(f"skillset: {error}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("skillset: interrupted", file=sys.stderr)
+        return 130
+    except Exception as error:
+        print(f"skillset: operation failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
