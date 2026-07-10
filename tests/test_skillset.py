@@ -1,3 +1,4 @@
+import errno
 import fcntl
 import json
 import os
@@ -60,6 +61,45 @@ class SkillsetTests(unittest.TestCase):
             capture_output=True,
             timeout=timeout,
             check=False,
+        )
+
+    def run_cli_tty(self, *arguments, extra_environment=None):
+        environment = self.environment()
+        environment.pop("NO_COLOR", None)
+        environment["TERM"] = "xterm-256color"
+        if extra_environment:
+            environment.update(extra_environment)
+        master, slave = os.openpty()
+        process = subprocess.Popen(
+            [str(SKILLSET), *arguments],
+            cwd=self.home,
+            env=environment,
+            stdout=slave,
+            stderr=subprocess.PIPE,
+            text=False,
+        )
+        os.close(slave)
+        chunks = []
+        try:
+            while True:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError as error:
+                    if error.errno == errno.EIO:
+                        break
+                    raise
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            _stdout, stderr = process.communicate(timeout=5)
+        finally:
+            os.close(master)
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=2)
+        stdout = b"".join(chunks).decode("utf-8").replace("\r\n", "\n")
+        return subprocess.CompletedProcess(
+            process.args, process.returncode, stdout, stderr.decode("utf-8")
         )
 
     def popen_cli(
@@ -169,11 +209,16 @@ class SkillsetTests(unittest.TestCase):
             for relative, metadata in self.filesystem_snapshot(root).items()
         }
 
+    def show_rows(self, output):
+        lines = output.splitlines()
+        self.assertGreaterEqual(len(lines), 2, output)
+        self.assertIn("|", lines[0])
+        return [tuple(cell.strip() for cell in line.split("|", 1)) for line in lines[2:]]
+
     def assert_invalid_show_entry(self, output, directory, category):
-        prefix = f"{directory} — [invalid: "
-        matches = [line for line in output.splitlines() if line.startswith(prefix)]
+        matches = [row for row in self.show_rows(output) if row[0] == directory]
         self.assertEqual(len(matches), 1, (directory, output))
-        self.assertIn(category.lower(), matches[0].lower())
+        self.assertIn(category.lower(), matches[0][1].lower())
 
     def fault_environment(self, source):
         directory = self.sandbox / f"fault-{len(list(self.sandbox.glob('fault-*')))}"
@@ -969,7 +1014,7 @@ class SkillsetTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
         self.assertEqual(listed.stdout, "baseline\n* experiment\n")
         self.assertEqual(current.stdout, "experiment\n")
-        self.assertEqual(shown.stdout, "")
+        self.assertEqual(shown.stdout, "No skills installed.\n")
         self.assert_aliases(self.root, "trial")
         self.assertFalse(os.path.lexists(self.root / "skillsets" / "baseline"))
         self.assert_fake_argv(record, ["skills", "list", "--json", "--global"])
@@ -1075,14 +1120,157 @@ class SkillsetTests(unittest.TestCase):
             self.assertIn(escaped, result.stderr)
         self.assertEqual(self.filesystem_snapshot(self.home), before)
 
-    def test_show_empty_set_has_empty_output(self):
+    def test_show_empty_set_prints_explanatory_message(self):
         self.initialize()
 
-        result = self.run_cli("show", "default")
+        result = self.run_cli("show")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stdout, "No skills installed.\n")
         self.assertEqual(result.stderr, "")
+
+    def test_show_defaults_to_active_set_and_explicit_name_overrides_it(self):
+        self.initialize("default")
+        alternate = self.make_set(self.root, "alternate")
+        self.write_skill(
+            self.root / "skillsets/default/skills",
+            "alpha",
+            "name: alpha\ndescription: active",
+        )
+        self.write_skill(
+            alternate / "skills", "beta", "name: beta\ndescription: explicit"
+        )
+
+        active = self.run_cli("show")
+        explicit = self.run_cli("show", "alternate")
+        switched = self.run_cli("use", "alternate")
+        new_active = self.run_cli("show")
+
+        self.assertIn("alpha", active.stdout)
+        self.assertNotIn("beta", active.stdout)
+        self.assertIn("beta", explicit.stdout)
+        self.assertNotIn("alpha", explicit.stdout)
+        self.assertEqual(switched.returncode, 0, switched.stderr)
+        self.assertIn("beta", new_active.stdout)
+        self.assertNotIn("alpha", new_active.stdout)
+
+    def test_show_help_marks_name_as_optional(self):
+        result = self.run_cli("show", "--help")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout, r"usage: skillset show \[-h\] \[name\]")
+
+    def test_show_prints_borderless_table_with_aligned_inner_delimiter(self):
+        self.initialize()
+        skills = self.root / "skillsets/default/skills"
+        self.write_skill(skills, "short", "name: alpha\ndescription: Short")
+        self.write_skill(
+            skills, "long", "name: longer-name\ndescription: Longer description"
+        )
+
+        result = self.run_cli("show")
+
+        self.assertEqual(
+            result.stdout,
+            "SKILL       | DESCRIPTION\n"
+            "------------|-------------------\n"
+            "alpha       | Short\n"
+            "longer-name | Longer description\n",
+        )
+        self.assertNotIn("\x1b", result.stdout)
+
+    def test_show_colorizes_only_eligible_tty_output(self):
+        self.initialize()
+        skills = self.root / "skillsets/default/skills"
+        self.write_skill(skills, "valid", "name: alpha\ndescription: valid")
+        self.write_skill(skills, "warning", "name: warning")
+        (skills / "error").mkdir()
+
+        colored = self.run_cli_tty("show")
+
+        self.assertEqual(colored.returncode, 0, colored.stderr)
+        self.assertIn("\x1b[1mSKILL\x1b[0m", colored.stdout)
+        self.assertIn("\x1b[2m|\x1b[0m", colored.stdout)
+        self.assertRegex(colored.stdout, r"\x1b\[2m-+\|-+\x1b\[0m")
+        self.assertIn("\x1b[36malpha\x1b[0m", colored.stdout)
+        self.assertIn(
+            "\x1b[33m[invalid: missing description]\x1b[0m", colored.stdout
+        )
+        self.assertIn(
+            "\x1b[31m[invalid: missing SKILL.md]\x1b[0m", colored.stdout
+        )
+
+        plain = self.run_cli("show")
+
+        self.assertNotIn("\x1b", plain.stdout)
+
+    def test_show_tty_color_honors_environment_opt_outs(self):
+        self.initialize()
+        skills = self.root / "skillsets/default/skills"
+        self.write_skill(skills, "valid", "name: alpha\ndescription: valid")
+        colored = self.run_cli_tty("show")
+        plain = self.run_cli("show").stdout
+
+        self.assertEqual(colored.returncode, 0, colored.stderr)
+        self.assertIn("\x1b[36malpha\x1b[0m", colored.stdout)
+
+        for extra_environment in ({"NO_COLOR": "1"}, {"TERM": "dumb"}):
+            with self.subTest(environment=extra_environment):
+                result = self.run_cli_tty(
+                    "show", extra_environment=extra_environment
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, plain)
+                self.assertNotIn("\x1b", result.stdout)
+
+    def test_show_dims_empty_tty_message(self):
+        self.initialize()
+
+        result = self.run_cli_tty("show")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "\x1b[2mNo skills installed.\x1b[0m\n")
+
+    def test_show_sanitizes_terminal_controls_before_tty_styling(self):
+        self.initialize()
+        skills = self.root / "skillsets/default/skills"
+        declared = "unsafe\x1b]8;;https://example.invalid\x07name"
+        self.write_skill(
+            skills, "unsafe", f"name: {declared}\ndescription: controlled"
+        )
+
+        result = self.run_cli_tty("show")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("\x1b]8;;", result.stdout)
+        self.assertIn(
+            "\x1b[36m"
+            r"unsafe\x1b]8;;https://example.invalid\x07name"
+            "\x1b[0m",
+            result.stdout,
+        )
+
+    def test_show_aligns_common_wide_and_combining_skill_names(self):
+        self.initialize()
+        skills = self.root / "skillsets/default/skills"
+        self.write_skill(skills, "wide", "name: 界界界\ndescription: wide")
+        combining = "e\u0301" * 6
+        self.write_skill(
+            skills,
+            "combining",
+            f"name: {combining}\ndescription: combining",
+        )
+
+        result = self.run_cli("show")
+
+        self.assertEqual(
+            result.stdout,
+            "SKILL  | DESCRIPTION\n"
+            "-------|------------\n"
+            f"{combining} | combining\n"
+            "界界界 | wide\n",
+        )
 
     def test_show_parses_supported_frontmatter_scalars_and_normalizes_descriptions(self):
         self.initialize()
@@ -1142,17 +1330,19 @@ class SkillsetTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
-            result.stdout,
-            "alpha — plain description\n"
-            "comments — plain value\n"
-            "double — first second \"quoted\" and \\ slash\n"
-            "folded — folded line next line\n"
-            "literal — first line second line\n"
-            "multi-double — first double line second line\n"
-            "multi-plain — first plain line second plain line\n"
-            "multi-single — first single line second single line\n"
-            "o'brien — single 'quoted' description\n"
-            "quoted-comment — kept # hash\n",
+            self.show_rows(result.stdout),
+            [
+                ("alpha", "plain description"),
+                ("comments", "plain value"),
+                ("double", 'first second "quoted" and \\ slash'),
+                ("folded", "folded line next line"),
+                ("literal", "first line second line"),
+                ("multi-double", "first double line second line"),
+                ("multi-plain", "first plain line second plain line"),
+                ("multi-single", "first single line second single line"),
+                ("o'brien", "single 'quoted' description"),
+                ("quoted-comment", "kept # hash"),
+            ],
         )
         self.assertEqual(result.stderr, "")
 
@@ -1175,13 +1365,11 @@ class SkillsetTests(unittest.TestCase):
         for raw in ("\x1b", "\x7f", "\x9b", "\u202e", "\u2066"):
             self.assertNotIn(raw, result.stdout)
         self.assertEqual(
-            result.stdout,
-            "café\\x1b\\x7f\\u202eoutil — "
-            "naïve\\x1b\\x9b\\u2066 texte\n",
+            self.show_rows(result.stdout),
+            [(r"café\x1b\x7f\u202eoutil", r"naïve\x1b\x9b\u2066 texte")],
         )
         self.assertIn("café", result.stdout)
         self.assertIn("naïve", result.stdout)
-        self.assertIn(" — ", result.stdout)
         self.assertEqual(self.filesystem_snapshot(self.home), before)
 
     def test_show_visibly_escapes_invalid_directory_terminal_controls(self):
@@ -1197,8 +1385,10 @@ class SkillsetTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         for raw in ("\x1b", "\u2028"):
             self.assertNotIn(raw, result.stdout)
-        expected = r"café\x1b\u2028outil — [invalid: missing SKILL.md]"
-        self.assertEqual(result.stdout.splitlines(), [expected])
+        self.assertEqual(
+            self.show_rows(result.stdout),
+            [(r"café\x1b\u2028outil", "[invalid: missing SKILL.md]")],
+        )
         self.assertIn("café", result.stdout)
         self.assertEqual(self.filesystem_snapshot(self.home), before)
 
@@ -1268,11 +1458,13 @@ class SkillsetTests(unittest.TestCase):
         result = self.run_cli("show", "default")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("valid-sibling — remains visible\n", result.stdout)
+        self.assertIn(
+            ("valid-sibling", "remains visible"), self.show_rows(result.stdout)
+        )
         for directory, (_contents, category) in invalid.items():
             with self.subTest(directory=directory):
                 self.assert_invalid_show_entry(result.stdout, directory, category)
-        displayed = [line.split(" — ", 1)[0] for line in result.stdout.splitlines()]
+        displayed = [row[0] for row in self.show_rows(result.stdout)]
         self.assertEqual(displayed, sorted(displayed))
 
     def test_show_ignores_regular_files_and_never_follows_direct_skill_symlinks(self):
@@ -1298,7 +1490,9 @@ class SkillsetTests(unittest.TestCase):
         result = self.run_cli("show", "default")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("valid — direct real directory\n", result.stdout)
+        self.assertIn(
+            ("valid", "direct real directory"), self.show_rows(result.stdout)
+        )
         self.assertNotIn("ordinary-file", result.stdout)
         self.assertNotIn("external-secret", result.stdout)
         self.assert_invalid_show_entry(result.stdout, "missing-skill-file", "missing")
@@ -1393,7 +1587,7 @@ class SkillsetTests(unittest.TestCase):
         expected = {
             ("list",): "* default\n",
             ("current",): "default\n",
-            ("show", "default"): "",
+            ("show", "default"): "No skills installed.\n",
         }
         lock_path = self.root / ".skillset.lock"
         for index, (arguments, stdout_expected) in enumerate(expected.items()):
@@ -1751,7 +1945,6 @@ class SkillsetTests(unittest.TestCase):
             ("list", "--unknown"),
             ("current", "extra"),
             ("current", "--verbose"),
-            ("show",),
             ("show", "default", "extra"),
             ("doctor", "extra"),
             ("unknown-command",),

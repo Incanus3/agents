@@ -136,13 +136,27 @@ $ skillset current
 default
 ```
 
-Show one set's direct skill directories, sorted by the displayed name:
+Show the active set's direct skill directories, sorted by the displayed name:
 
 ```text
-$ skillset show default
-alpha — First skill
-broken-directory — [invalid: missing description]
+$ skillset show
+SKILL            | DESCRIPTION
+-----------------|-------------------------------
+alpha            | First skill
+broken-directory | [invalid: missing description]
 ```
+
+`NAME` is optional for `skillset show [NAME]`: omitting it inspects the active
+skillset, while an explicit name inspects that set whether it is active or
+inactive. Non-empty sets use the headered, aligned `SKILL | DESCRIPTION` table
+shown above. An empty set prints `No skills installed.` without table headers.
+
+When stdout is a TTY, `NO_COLOR` is absent, and `TERM` is not `dumb`, `show`
+makes both header cells bold and valid skill names cyan. It colors
+`[invalid: missing description]` yellow and every other invalid description red,
+makes every row's `|` delimiter and the complete separator dim, and also dims the
+empty-set message. All non-TTY output, including pipes and redirects, is plain
+text; `NO_COLOR` and `TERM=dumb` also suppress ANSI styling.
 
 `show` reads UTF-8 `SKILL.md` files whose first line is exactly `---` and that
 have a later exact `---` closing line. Before that close, top-level `name` and
@@ -154,13 +168,14 @@ continue on indented physical lines, and trailing comments are ignored outside
 quotes. It ignores extra keys and the body, and collapses whitespace in both
 displayed values.
 
-Malformed, non-UTF-8, or invalid decoded-Unicode candidates remain visible as
-`<directory> — [invalid: <reason>]`; verbose `list` omits them. Direct regular
-files are ignored. Direct skill-directory symlinks and `SKILL.md` symlinks are
-never followed. Declared names and descriptions preserve ordinary printable
-Unicode, while terminal controls, invisible format controls, and line/paragraph
-separators are rendered as deterministic `\xNN`, `\uNNNN`, or `\UNNNNNNNN`
-escapes. Wrapper-created tabs, em dashes, and line endings remain unchanged.
+Malformed, non-UTF-8, or invalid decoded-Unicode candidates remain visible in
+the table as `<directory> | [invalid: <reason>]`; verbose `list` omits them.
+Direct regular files are ignored. Direct skill-directory symlinks and
+`SKILL.md` symlinks are never followed. Declared names and descriptions preserve
+ordinary printable Unicode, while terminal controls, invisible format controls,
+and line/paragraph separators are rendered as deterministic `\xNN`, `\uNNNN`,
+or `\UNNNNNNNN` escapes. Wrapper-created tabs, table delimiters, and line
+endings remain unchanged.
 
 ## Diagnose the managed layout
 

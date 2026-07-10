@@ -2,6 +2,7 @@ import json
 import os
 import re
 import stat
+import sys
 import unicodedata
 
 from .layout import set_path, validate_layout, validate_set
@@ -237,19 +238,75 @@ def current(root):
     print(validate_layout(root))
 
 
-def show(root, name):
-    validate_layout(root)
-    skills = validate_set(root, name) / "skills"
-    lines = []
+RESET = "\x1b[0m"
+BOLD = "\x1b[1m"
+DIM = "\x1b[2m"
+CYAN = "\x1b[36m"
+YELLOW = "\x1b[33m"
+RED = "\x1b[31m"
+
+
+def display_width(value):
+    width = 0
+    for character in value:
+        if unicodedata.combining(character):
+            continue
+        width += 2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1
+    return width
+
+
+def pad_display(value, width):
+    return value + " " * (width - display_width(value))
+
+
+def color_enabled(output):
+    return (
+        output.isatty()
+        and "NO_COLOR" not in os.environ
+        and os.environ.get("TERM") != "dumb"
+    )
+
+
+def styled(value, code, enabled):
+    return f"{code}{value}{RESET}" if enabled else value
+
+
+def show(root, name, output=None):
+    output = sys.stdout if output is None else output
+    colored = color_enabled(output)
+    active_name = validate_layout(root)
+    selected_name = active_name if name is None else name
+    skills = validate_set(root, selected_name) / "skills"
+    rows = []
     for directory, declared, description, reason in inspect_skills(skills):
-        if reason is None:
-            lines.append(
-                f"{printable_text(declared)} — {printable_text(description)}"
-            )
+        left = printable_text(declared if reason is None else directory)
+        right = printable_text(description) if reason is None else f"[invalid: {reason}]"
+        rows.append((left, right, reason))
+    rows.sort(key=lambda row: (row[0], row[1]))
+    if not rows:
+        print(styled("No skills installed.", DIM, colored), file=output)
+        return
+    left_width = max(display_width("SKILL"), *(display_width(row[0]) for row in rows))
+    right_width = max(
+        display_width("DESCRIPTION"), *(display_width(row[1]) for row in rows)
+    )
+    header_left = styled("SKILL", BOLD, colored)
+    header_left += " " * (left_width - display_width("SKILL"))
+    header_right = styled("DESCRIPTION", BOLD, colored)
+    divider = styled("|", DIM, colored)
+    print(f"{header_left} {divider} {header_right}", file=output)
+    separator = "-" * (left_width + 1) + "|" + "-" * (right_width + 1)
+    print(styled(separator, DIM, colored), file=output)
+    for left, right, reason in rows:
+        left_cell = styled(left, CYAN, colored) if reason is None else left
+        left_cell += " " * (left_width - display_width(left))
+        if reason == "missing description":
+            right_cell = styled(right, YELLOW, colored)
+        elif reason is not None:
+            right_cell = styled(right, RED, colored)
         else:
-            lines.append(f"{printable_text(directory)} — [invalid: {reason}]")
-    for line in sorted(lines):
-        print(line)
+            right_cell = right
+        print(f"{left_cell} {divider} {right_cell}", file=output)
 
 
 def printable_text(value):

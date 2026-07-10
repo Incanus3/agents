@@ -56,7 +56,7 @@ def parser():
     list_parser.add_argument("-v", "--verbose", action="store_true")
     commands.add_parser("current", help="print the active skillset name")
     show_parser = commands.add_parser("show", help="show skills in a skillset")
-    show_parser.add_argument("name")
+    show_parser.add_argument("name", nargs="?")
     commands.add_parser("doctor", help="diagnose the managed layout")
     skills_parser = commands.add_parser(
         "skills", help="run managed upstream skills", add_help=False
