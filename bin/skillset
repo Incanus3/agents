@@ -15,6 +15,8 @@ from pathlib import Path
 
 EMPTY_LOCK = {"version": 3, "skills": {}, "dismissed": {}}
 NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
+SCOPED_SKILLS_COMMANDS = {"add", "list", "ls", "remove", "rm", "update"}
+SCOPE_FREE_SKILLS_COMMANDS = {"find", "use", "init"}
 
 
 class OperationalError(Exception):
@@ -137,7 +139,7 @@ def operation_lock(root):
     with lock_path.open("a+") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
-            yield
+            yield lock_file
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 
@@ -302,6 +304,44 @@ def use(root, name):
         raise OperationalError(f"could not activate {name!r}: {error}") from error
 
 
+def delegate_skills(root, arguments, lock_file, command_parser):
+    validate_layout(root)
+    upstream_arguments = list(arguments)
+    if upstream_arguments:
+        command = upstream_arguments[0]
+        if command in SCOPED_SKILLS_COMMANDS:
+            option_end = (
+                upstream_arguments.index("--")
+                if "--" in upstream_arguments
+                else len(upstream_arguments)
+            )
+            scope_arguments = upstream_arguments[:option_end]
+            if any(argument in ("-p", "--project") for argument in scope_arguments):
+                command_parser.error(
+                    "project scope is not supported for managed skills; use global scope"
+                )
+            if not any(
+                argument in ("-g", "--global") for argument in scope_arguments
+            ):
+                upstream_arguments.insert(option_end, "--global")
+        elif command not in SCOPE_FREE_SKILLS_COMMANDS and not command.startswith("-"):
+            print(
+                "skillset: warning: unknown upstream command; global scope was not injected",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    child_environment = os.environ.copy()
+    child_environment.pop("XDG_STATE_HOME", None)
+    os.set_inheritable(lock_file.fileno(), True)
+    try:
+        os.execvpe(
+            "npx", ["npx", "skills", *upstream_arguments], child_environment
+        )
+    except OSError as error:
+        raise OperationalError(f"could not execute npx skills: {error}") from error
+
+
 def parser():
     command_parser = SkillsetArgumentParser(prog="skillset")
     commands = command_parser.add_subparsers(dest="command", required=True)
@@ -312,20 +352,29 @@ def parser():
     create_parser.add_argument("--from", dest="source", metavar="SOURCE")
     use_parser = commands.add_parser("use", help="activate a skillset")
     use_parser.add_argument("name")
+    skills_parser = commands.add_parser(
+        "skills", help="run managed upstream skills", add_help=False
+    )
+    skills_parser.add_argument("arguments", nargs=argparse.REMAINDER)
     return command_parser
 
 
 def main():
-    arguments = parser().parse_args()
+    command_parser = parser()
+    arguments = command_parser.parse_args()
     root = Path.home() / ".agents"
     try:
-        with operation_lock(root):
+        with operation_lock(root) as lock_file:
             if arguments.command == "init":
                 init(root, arguments.name)
             elif arguments.command == "create":
                 create(root, arguments.name, arguments.source)
-            else:
+            elif arguments.command == "use":
                 use(root, arguments.name)
+            else:
+                delegate_skills(
+                    root, arguments.arguments, lock_file, command_parser
+                )
     except OperationalError as error:
         print(f"skillset: {error}", file=sys.stderr)
         return 1

@@ -2,6 +2,7 @@ import fcntl
 import json
 import os
 import re
+import signal
 import shutil
 import stat
 import subprocess
@@ -42,18 +43,32 @@ class SkillsetTests(unittest.TestCase):
             environment.update(extra)
         return environment
 
-    def run_cli(self, *arguments, home=None, extra_environment=None, timeout=5):
+    def run_cli(
+        self,
+        *arguments,
+        home=None,
+        extra_environment=None,
+        input_text=None,
+        timeout=5,
+    ):
         return subprocess.run(
             [str(SKILLSET), *arguments],
             cwd=home or self.home,
             env=self.environment(home, extra_environment),
             text=True,
+            input=input_text,
             capture_output=True,
             timeout=timeout,
             check=False,
         )
 
-    def popen_cli(self, *arguments, home=None, extra_environment=None):
+    def popen_cli(
+        self,
+        *arguments,
+        home=None,
+        extra_environment=None,
+        start_new_session=False,
+    ):
         return subprocess.Popen(
             [str(SKILLSET), *arguments],
             cwd=home or self.home,
@@ -61,6 +76,7 @@ class SkillsetTests(unittest.TestCase):
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            start_new_session=start_new_session,
         )
 
     def write_lock(self, path, value=EMPTY_LOCK, *, raw=None):
@@ -116,16 +132,402 @@ class SkillsetTests(unittest.TestCase):
         )
         return {"PYTHONPATH": str(directory)}
 
+    def fake_npx_environment(self, home=None):
+        home = home or self.home
+        directory = home / "fake-bin"
+        directory.mkdir(exist_ok=True)
+        executable = directory / "npx"
+        executable.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env python3
+                import json
+                import os
+                import signal
+                import sys
+                import time
+                from pathlib import Path
+
+                def write_marker(variable, value=""):
+                    path = os.environ.get(variable)
+                    if path:
+                        Path(path).write_text(str(value), encoding="utf-8")
+
+                record = os.environ.get("FAKE_NPX_RECORD")
+                if record:
+                    Path(record).write_text(json.dumps({
+                        "argv": sys.argv[1:],
+                        "environment": {
+                            "XDG_STATE_HOME_present": "XDG_STATE_HOME" in os.environ,
+                            "XDG_STATE_HOME": os.environ.get("XDG_STATE_HOME"),
+                        },
+                        "pid": os.getpid(),
+                    }), encoding="utf-8")
+
+                def handle_signal(number, _frame):
+                    write_marker("FAKE_NPX_SIGNAL", number)
+                    raise SystemExit(int(os.environ.get("FAKE_NPX_SIGNAL_STATUS", "128")))
+
+                signal.signal(signal.SIGINT, handle_signal)
+                signal.signal(signal.SIGTERM, handle_signal)
+                write_marker("FAKE_NPX_READY", os.getpid())
+                if os.environ.get("FAKE_NPX_ECHO_STDIN"):
+                    data = sys.stdin.read()
+                    sys.stdout.write(data)
+                    sys.stdout.flush()
+                    sys.stderr.write(data)
+                    sys.stderr.flush()
+                wait_path = os.environ.get("FAKE_NPX_WAIT_FOR")
+                while wait_path and not Path(wait_path).exists():
+                    time.sleep(0.01)
+                raise SystemExit(int(os.environ.get("FAKE_NPX_STATUS", "0")))
+                """
+            ),
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+        record = home / "fake-npx-record.json"
+        return {
+            "PATH": str(directory) + os.pathsep + os.environ.get("PATH", ""),
+            "FAKE_NPX_RECORD": str(record),
+        }, record
+
+    def wait_for_path(self, path, process=None, timeout=5):
+        deadline = time.monotonic() + timeout
+        while not path.exists() and time.monotonic() < deadline:
+            if process is not None and process.poll() is not None:
+                self.fail(f"process exited before creating {path}: {process.communicate()}")
+            time.sleep(0.01)
+        self.assertTrue(path.exists(), f"timed out waiting for {path}")
+
+    def wait_for_pid_exit(self, pid, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.01)
+        self.fail(f"delegated child {pid} remained alive")
+
+    def assert_fake_argv(self, record, expected):
+        self.assertTrue(record.exists(), "fake npx was not invoked")
+        payload = json.loads(record.read_text(encoding="utf-8"))
+        self.assertEqual(payload["argv"], expected)
+        return payload
+
     def assert_refused(self, result):
         self.assertEqual(result.returncode, 1, (result.stdout, result.stderr))
 
-    def test_help_exposes_only_bead_one_commands(self):
+    def test_help_includes_managed_skills_delegation(self):
         result = self.run_cli("--help")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         command_group = re.search(r"\{([^}]+)\}", result.stdout)
         self.assertIsNotNone(command_group, result.stdout)
-        self.assertEqual(set(command_group.group(1).split(",")), {"init", "create", "use"})
+        self.assertEqual(
+            set(command_group.group(1).split(",")),
+            {"init", "create", "use", "skills"},
+        )
+
+    def test_skills_appends_global_to_scoped_upstream_commands(self):
+        self.initialize()
+        environment, record = self.fake_npx_environment()
+        cases = (
+            (("add", "owner/repository", "--skill", "alpha"),
+             ["skills", "add", "owner/repository", "--skill", "alpha", "--global"]),
+            (("list", "--json"), ["skills", "list", "--json", "--global"]),
+            (("ls",), ["skills", "ls", "--global"]),
+            (("remove", "alpha", "beta"),
+             ["skills", "remove", "alpha", "beta", "--global"]),
+            (("rm", "alpha"), ["skills", "rm", "alpha", "--global"]),
+            (("update", "alpha"), ["skills", "update", "alpha", "--global"]),
+        )
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments):
+                record.unlink(missing_ok=True)
+                result = self.run_cli("skills", *arguments, extra_environment=environment)
+                self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+                self.assert_fake_argv(record, expected)
+
+    def test_skills_preserves_existing_global_flags_without_adding_duplicates(self):
+        self.initialize()
+        environment, record = self.fake_npx_environment()
+        cases = (
+            (("add", "source", "-g", "--agent", "cursor"),
+             ["skills", "add", "source", "-g", "--agent", "cursor"]),
+            (("remove", "alpha", "--global"),
+             ["skills", "remove", "alpha", "--global"]),
+        )
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments):
+                record.unlink(missing_ok=True)
+                result = self.run_cli("skills", *arguments, extra_environment=environment)
+                self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+                payload = self.assert_fake_argv(record, expected)
+                self.assertEqual(
+                    sum(flag in ("-g", "--global") for flag in payload["argv"]), 1
+                )
+
+    def test_skills_rejects_project_scope_for_scoped_commands_without_child(self):
+        self.initialize()
+        environment, record = self.fake_npx_environment()
+        for command in ("add", "list", "ls", "remove", "rm", "update"):
+            for project_flag in ("-p", "--project"):
+                with self.subTest(command=command, project_flag=project_flag):
+                    record.unlink(missing_ok=True)
+                    result = self.run_cli(
+                        "skills", command, "alpha", project_flag,
+                        extra_environment=environment,
+                    )
+                    self.assertEqual(result.returncode, 2, (result.stdout, result.stderr))
+                    self.assertIn("project", (result.stdout + result.stderr).lower())
+                    self.assertFalse(record.exists(), "project scope invoked npx")
+
+    def test_skills_passes_scope_free_and_empty_arguments_unchanged(self):
+        self.initialize()
+        environment, record = self.fake_npx_environment()
+        cases = (
+            ((), ["skills"]),
+            (("-h",), ["skills", "-h"]),
+            (("--help",), ["skills", "--help"]),
+            (("find", "formatters", "--limit", "2"),
+             ["skills", "find", "formatters", "--limit", "2"]),
+            (("use", "alpha", "--agent", "cursor"),
+             ["skills", "use", "alpha", "--agent", "cursor"]),
+            (("init", "--yes"), ["skills", "init", "--yes"]),
+        )
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments):
+                record.unlink(missing_ok=True)
+                result = self.run_cli("skills", *arguments, extra_environment=environment)
+                self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+                self.assert_fake_argv(record, expected)
+
+    def test_skills_passes_unknown_command_unchanged_with_scope_warning(self):
+        self.initialize()
+        environment, record = self.fake_npx_environment()
+
+        result = self.run_cli(
+            "skills", "future-command", "two words", "--option=value",
+            extra_environment=environment,
+        )
+
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assert_fake_argv(
+            record, ["skills", "future-command", "two words", "--option=value"]
+        )
+        warning = result.stderr.lower()
+        self.assertIn("warning", warning)
+        self.assertIn("global", warning)
+        self.assertIn("inject", warning)
+        self.assertRegex(warning, r"\b(no|not|without)\b")
+
+    def test_skills_preserves_arbitrary_argument_boundaries_and_order(self):
+        self.initialize()
+        environment, record = self.fake_npx_environment()
+        arguments = ("add", "source with spaces", "", "--tag=a b", "--", "-literal")
+
+        result = self.run_cli("skills", *arguments, extra_environment=environment)
+
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assert_fake_argv(
+            record,
+            ["skills", "add", "source with spaces", "", "--tag=a b", "--global", "--", "-literal"],
+        )
+
+    def test_skills_treats_scope_flags_after_option_terminator_as_literals(self):
+        self.initialize()
+        environment, record = self.fake_npx_environment()
+        cases = (
+            (
+                ("add", "source", "--", "--global"),
+                ["skills", "add", "source", "--global", "--", "--global"],
+            ),
+            (
+                ("remove", "alpha", "--", "--project"),
+                ["skills", "remove", "alpha", "--global", "--", "--project"],
+            ),
+        )
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments):
+                record.unlink(missing_ok=True)
+                result = self.run_cli("skills", *arguments, extra_environment=environment)
+                self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+                self.assert_fake_argv(record, expected)
+
+    def test_skills_removes_xdg_state_home_only_from_child_environment(self):
+        self.initialize()
+        environment, record = self.fake_npx_environment()
+        sentinel = str(self.sandbox / "caller-xdg-state")
+        environment["XDG_STATE_HOME"] = sentinel
+        existed = "XDG_STATE_HOME" in os.environ
+        original = os.environ.get("XDG_STATE_HOME")
+        os.environ["XDG_STATE_HOME"] = sentinel
+        try:
+            result = self.run_cli("skills", "list", extra_environment=environment)
+            self.assertEqual(os.environ.get("XDG_STATE_HOME"), sentinel)
+        finally:
+            if existed:
+                os.environ["XDG_STATE_HOME"] = original
+            else:
+                os.environ.pop("XDG_STATE_HOME", None)
+
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        payload = self.assert_fake_argv(record, ["skills", "list", "--global"])
+        self.assertFalse(payload["environment"]["XDG_STATE_HOME_present"])
+        self.assertIsNone(payload["environment"]["XDG_STATE_HOME"])
+
+    def test_skills_child_behaviorally_inherits_stdin_stdout_and_stderr(self):
+        self.initialize()
+        environment, _record = self.fake_npx_environment()
+        environment["FAKE_NPX_ECHO_STDIN"] = "1"
+        payload = "first line\nsecond line with spaces\n"
+
+        result = self.run_cli(
+            "skills", "find", "alpha",
+            extra_environment=environment,
+            input_text=payload,
+        )
+
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assertEqual(result.stdout, payload)
+        self.assertEqual(result.stderr, payload)
+
+    def test_skills_returns_exact_nonzero_upstream_status(self):
+        self.initialize()
+        environment, _record = self.fake_npx_environment()
+        environment["FAKE_NPX_STATUS"] = "37"
+
+        result = self.run_cli("skills", "find", "alpha", extra_environment=environment)
+
+        self.assertEqual(result.returncode, 37, (result.stdout, result.stderr))
+
+    def test_skills_signal_reaches_child_without_leaving_it_orphaned(self):
+        self.initialize()
+        environment, record = self.fake_npx_environment()
+        ready = self.sandbox / "signal-child-ready"
+        release = self.sandbox / "signal-child-release"
+        received = self.sandbox / "signal-child-received"
+        environment.update({
+            "FAKE_NPX_READY": str(ready),
+            "FAKE_NPX_WAIT_FOR": str(release),
+            "FAKE_NPX_SIGNAL": str(received),
+            "FAKE_NPX_SIGNAL_STATUS": "73",
+        })
+        process = self.popen_cli(
+            "skills", "find", "alpha",
+            extra_environment=environment,
+            start_new_session=True,
+        )
+        try:
+            self.wait_for_path(ready, process)
+            child_pid = self.assert_fake_argv(
+                record, ["skills", "find", "alpha"]
+            )["pid"]
+            os.killpg(os.getpgid(process.pid), signal.SIGINT)
+            stdout, stderr = process.communicate(timeout=5)
+            self.wait_for_path(received)
+            self.assertEqual(int(received.read_text(encoding="utf-8")), signal.SIGINT)
+            self.wait_for_pid_exit(child_pid)
+        finally:
+            if process.poll() is None:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                process.communicate(timeout=2)
+        self.assertEqual(process.returncode, 73, (stdout, stderr))
+
+    def test_skills_holds_advisory_lock_for_child_lifetime_and_blocks_management(self):
+        self.initialize()
+        environment, _record = self.fake_npx_environment()
+        child_ready = self.sandbox / "locking-child-ready"
+        child_release = self.sandbox / "locking-child-release"
+        lock_attempted = self.sandbox / "management-lock-attempted"
+        environment.update({
+            "FAKE_NPX_READY": str(child_ready),
+            "FAKE_NPX_WAIT_FOR": str(child_release),
+        })
+        delegated = self.popen_cli("skills", "list", extra_environment=environment)
+        management = None
+        try:
+            self.wait_for_path(child_ready, delegated)
+            with (self.root / ".skillset.lock").open("a+") as probe:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            fault = self.fault_environment(
+                f"""
+                import fcntl
+                from pathlib import Path
+                marker = Path({str(lock_attempted)!r})
+                original_flock = fcntl.flock
+                def marked_flock(file, operation):
+                    if operation & fcntl.LOCK_EX:
+                        marker.write_text("attempted", encoding="utf-8")
+                    return original_flock(file, operation)
+                fcntl.flock = marked_flock
+                """
+            )
+            management = self.popen_cli(
+                "create", "blocked", extra_environment=fault
+            )
+            self.wait_for_path(lock_attempted, management)
+            self.assertIsNone(management.poll(), "management did not block on delegation")
+            self.assertFalse((self.root / "skillsets" / "blocked").exists())
+
+            child_release.write_text("release", encoding="utf-8")
+            delegated_output = delegated.communicate(timeout=5)
+            management_output = management.communicate(timeout=5)
+            self.assertEqual(delegated.returncode, 0, delegated_output)
+            self.assertEqual(management.returncode, 0, management_output)
+            self.assertTrue((self.root / "skillsets" / "blocked").is_dir())
+        finally:
+            child_release.touch()
+            for process in (delegated, management):
+                if process is not None and process.poll() is None:
+                    process.kill()
+                    process.communicate(timeout=2)
+
+    def test_skills_refuses_uninitialized_and_invalid_layouts_without_child(self):
+        uninitialized = self.new_home("delegation-uninitialized")
+        environment, record = self.fake_npx_environment(uninitialized)
+        result = self.run_cli(
+            "skills", "list", home=uninitialized, extra_environment=environment
+        )
+        self.assert_refused(result)
+        self.assertFalse(record.exists(), "uninitialized delegation invoked npx")
+
+        def replace_link(path, target):
+            path.unlink()
+            path.symlink_to(target)
+
+        mutations = {
+            "skills-alias": lambda root: replace_link(
+                root / "skills", "skillsets/default/skills"
+            ),
+            "lock-alias": lambda root: replace_link(
+                root / ".skill-lock.json", "skillsets/default/.skill-lock.json"
+            ),
+            "active-target": lambda root: replace_link(
+                root / "active", "skillsets/missing"
+            ),
+            "set-shape": lambda root: shutil.rmtree(
+                root / "skillsets" / "default" / "skills"
+            ),
+            "lockfile": lambda root: (
+                root / "skillsets" / "default" / ".skill-lock.json"
+            ).write_text("not json\n", encoding="utf-8"),
+        }
+        for index, (label, mutate) in enumerate(mutations.items()):
+            with self.subTest(layout=label):
+                home = self.new_home(f"delegation-invalid-{index}")
+                root = self.make_managed_layout(home)
+                mutate(root)
+                environment, record = self.fake_npx_environment(home)
+                result = self.run_cli(
+                    "skills", "list", home=home, extra_environment=environment
+                )
+                self.assert_refused(result)
+                self.assertFalse(record.exists(), f"{label} invoked npx")
 
     def test_argparse_usage_errors_exit_two(self):
         cases = [

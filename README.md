@@ -2,7 +2,8 @@
 
 `skillset` manages multiple named global agent skill collections under
 `~/.agents/skillsets` and activates one collection through stable relative
-symlinks. The current Linux-only core provides `init`, `create`, and `use`.
+symlinks. The current Linux-only core provides `init`, `create`, `use`, and
+managed delegation to the upstream `skills` CLI.
 
 ## Requirements and PATH
 
@@ -51,18 +52,41 @@ skillset use experiment
 Activation atomically retargets `~/.agents/active`; the stable `skills` and
 `.skill-lock.json` aliases remain unchanged.
 
-## Temporary upstream usage
+## Install and maintain skills
 
-Until managed upstream delegation is added, run global `npx skills` commands
-with `XDG_STATE_HOME` removed so lock metadata stays under `~/.agents`:
+After activating the intended set, run upstream commands through the wrapper:
 
 ```sh
-env -u XDG_STATE_HOME npx skills add SOURCE -g
+skillset skills add SOURCE
+skillset skills list
+skillset skills remove SKILL
+skillset skills update
 ```
 
-Run such commands only after activating the intended set. Avoid concurrent
-direct `npx skills` and `skillset` operations because direct upstream commands
-do not participate in `skillset`'s advisory lock.
+For `add`, `list`/`ls`, `remove`/`rm`, and `update`, the wrapper injects
+`--global` unless exact `-g` or `--global` is already present before an option
+terminator. It inserts the flag before `--`, or appends it when no terminator is
+present. Exact `-p` and `--project` options are rejected for those commands
+because managed skillsets contain global state; tokens after `--` remain
+literals. Scope-free `find`, `use`, and upstream `init` commands, as well as an
+invocation with no upstream arguments, pass through unchanged:
+
+```sh
+skillset skills find formatter
+skillset skills use SKILL
+```
+
+Unknown upstream commands also pass through unchanged, but the wrapper warns
+on stderr that global scope was not injected. It does not reinterpret other
+upstream arguments or output. The delegated process inherits terminal streams,
+signals, and exit status; only its copied environment has `XDG_STATE_HOME`
+removed so lock metadata resolves through the active managed alias.
+
+All `skillset` management and delegated operations share one advisory lock.
+Delegation holds it for the complete `npx skills` process lifetime, so wrapper
+operations safely wait for one another. Prefer `skillset skills ...` after
+initialization: direct `npx skills` commands cannot honor this lock and must not
+run concurrently with `skillset` operations.
 
 ## Recovery
 
