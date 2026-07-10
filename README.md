@@ -2,8 +2,8 @@
 
 `skillset` manages multiple named global agent skill collections under
 `~/.agents/skillsets` and activates one collection through stable relative
-symlinks. The current Linux-only core provides `init`, `create`, `use`, and
-managed delegation to the upstream `skills` CLI.
+symlinks. The current Linux-only core provides lifecycle and inspection
+commands plus managed delegation to the upstream `skills` CLI.
 
 ## Requirements and PATH
 
@@ -52,6 +52,55 @@ skillset use experiment
 Activation atomically retargets `~/.agents/active`; the stable `skills` and
 `.skill-lock.json` aliases remain unchanged.
 
+## Inspect skillsets
+
+List sets in sorted order. The active set is the only one prefixed with `* `:
+
+```text
+$ skillset list
+* default
+experiment
+```
+
+Verbose output with either `-v` or `--verbose` adds a tab followed by sorted
+valid declared skill names, or `(no skills)` when none are valid:
+
+```text
+$ skillset list --verbose
+* default	alpha, zeta
+experiment	(no skills)
+```
+
+Print only the active name and its terminating newline for use in scripts:
+
+```text
+$ skillset current
+default
+```
+
+Show one set's direct skill directories, sorted by the displayed name:
+
+```text
+$ skillset show default
+alpha — First skill
+broken-directory — [invalid: missing description]
+```
+
+`show` reads UTF-8 `SKILL.md` files whose first line is exactly `---` and that
+have a later exact `---` closing line. Before that close, top-level `name` and
+`description` must each appear exactly once and be nonempty. The focused,
+dependency-free reader supports plain scalars, YAML-style single quotes with
+doubled apostrophes, JSON-compatible double-quoted escapes, and exact `|` or
+`>` markers followed by indented block content. Plain and quoted values may
+continue on indented physical lines, and trailing comments are ignored outside
+quotes. It ignores extra keys and the body, and collapses whitespace in both
+displayed values.
+
+Malformed, non-UTF-8, or invalid decoded-Unicode candidates remain visible as
+`<directory> — [invalid: <reason>]`; verbose `list` omits them. Direct regular
+files are ignored. Direct skill-directory symlinks and `SKILL.md` symlinks are
+never followed.
+
 ## Install and maintain skills
 
 After activating the intended set, run upstream commands through the wrapper:
@@ -82,11 +131,13 @@ upstream arguments or output. The delegated process inherits terminal streams,
 signals, and exit status; only its copied environment has `XDG_STATE_HOME`
 removed so lock metadata resolves through the active managed alias.
 
-All `skillset` management and delegated operations share one advisory lock.
-Delegation holds it for the complete `npx skills` process lifetime, so wrapper
-operations safely wait for one another. Prefer `skillset skills ...` after
-initialization: direct `npx skills` commands cannot honor this lock and must not
-run concurrently with `skillset` operations.
+All `skillset` management, inspection, and delegated operations share one
+advisory lock. Inspection waits for that lock, validates the complete managed
+layout, and remains read-only. Delegation holds the lock for the complete
+`npx skills` process lifetime, so wrapper operations safely wait for one
+another. Prefer `skillset skills ...` after initialization: direct `npx skills`
+commands cannot honor this lock and must not run concurrently with `skillset`
+operations.
 
 ## Recovery
 

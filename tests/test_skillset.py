@@ -124,6 +124,49 @@ class SkillsetTests(unittest.TestCase):
             EMPTY_LOCK,
         )
 
+    def write_skill(self, skills, directory, metadata, body=""):
+        skill = skills / directory
+        skill.mkdir()
+        frontmatter = textwrap.dedent(metadata).strip("\n")
+        skill.joinpath("SKILL.md").write_text(
+            f"---\n{frontmatter}\n---\n{body}", encoding="utf-8"
+        )
+        return skill
+
+    def filesystem_snapshot(self, root):
+        snapshot = {}
+
+        def visit(path, relative):
+            metadata = path.lstat()
+            kind = stat.S_IFMT(metadata.st_mode)
+            payload = None
+            if stat.S_ISLNK(metadata.st_mode):
+                payload = os.readlink(path)
+            elif stat.S_ISREG(metadata.st_mode):
+                payload = path.read_bytes()
+            snapshot[str(relative)] = (
+                kind,
+                stat.S_IMODE(metadata.st_mode),
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+                payload,
+            )
+            if stat.S_ISDIR(metadata.st_mode):
+                with os.scandir(path) as entries:
+                    for entry in sorted(entries, key=lambda item: item.name):
+                        visit(Path(entry.path), relative / entry.name)
+
+        visit(root, Path("."))
+        return snapshot
+
+    def assert_invalid_show_entry(self, output, directory, category):
+        prefix = f"{directory} — [invalid: "
+        matches = [line for line in output.splitlines() if line.startswith(prefix)]
+        self.assertEqual(len(matches), 1, (directory, output))
+        self.assertIn(category.lower(), matches[0].lower())
+
     def fault_environment(self, source):
         directory = self.sandbox / f"fault-{len(list(self.sandbox.glob('fault-*')))}"
         directory.mkdir()
@@ -219,7 +262,7 @@ class SkillsetTests(unittest.TestCase):
     def assert_refused(self, result):
         self.assertEqual(result.returncode, 1, (result.stdout, result.stderr))
 
-    def test_help_includes_managed_skills_delegation(self):
+    def test_help_includes_exact_commands_through_bead_three(self):
         result = self.run_cli("--help")
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -227,8 +270,373 @@ class SkillsetTests(unittest.TestCase):
         self.assertIsNotNone(command_group, result.stdout)
         self.assertEqual(
             set(command_group.group(1).split(",")),
-            {"init", "create", "use", "skills"},
+            {"init", "create", "use", "skills", "list", "current", "show"},
         )
+
+    def test_list_sorts_set_names_and_marks_only_the_active_set(self):
+        self.initialize("middle")
+        self.make_set(self.root, "zeta")
+        self.make_set(self.root, "alpha")
+
+        result = self.run_cli("list")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "alpha\n* middle\nzeta\n")
+        self.assertEqual(result.stderr, "")
+
+    def test_list_supports_both_verbose_flags_with_sorted_valid_declared_names(self):
+        self.initialize()
+        empty = self.make_set(self.root, "empty")
+        skills = self.root / "skillsets" / "default" / "skills"
+        self.write_skill(skills, "second-directory", """
+            name: zeta
+            description: Last declared skill
+        """)
+        self.write_skill(skills, "first-directory", """
+            name: alpha
+            description: First declared skill
+        """)
+        self.write_skill(skills, "malformed", """
+            name: hidden
+        """)
+        (skills / "ordinary-file.txt").write_text("ignored\n", encoding="utf-8")
+        self.assertEqual(list((empty / "skills").iterdir()), [])
+
+        expected = "* default\talpha, zeta\nempty\t(no skills)\n"
+        for flag in ("-v", "--verbose"):
+            with self.subTest(flag=flag):
+                result = self.run_cli("list", flag)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, expected)
+                self.assertEqual(result.stderr, "")
+
+    def test_current_prints_exact_active_name_before_and_after_use(self):
+        self.initialize("default")
+        self.make_set(self.root, "experiment")
+
+        before = self.run_cli("current")
+        switched = self.run_cli("use", "experiment")
+        after = self.run_cli("current")
+
+        self.assertEqual(before.returncode, 0, before.stderr)
+        self.assertEqual(before.stdout, "default\n")
+        self.assertEqual(before.stderr, "")
+        self.assertEqual(switched.returncode, 0, switched.stderr)
+        self.assertEqual(after.returncode, 0, after.stderr)
+        self.assertEqual(after.stdout, "experiment\n")
+        self.assertEqual(after.stderr, "")
+
+    def test_show_empty_set_has_empty_output(self):
+        self.initialize()
+
+        result = self.run_cli("show", "default")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+
+    def test_show_parses_supported_frontmatter_scalars_and_normalizes_descriptions(self):
+        self.initialize()
+        skills = self.root / "skillsets" / "default" / "skills"
+        self.write_skill(skills, "plain-directory", """
+            name: alpha
+            description: plain description
+            extra-key: [ignored, collection]
+        """, body="Body content is ignored, even with name: misleading.\n")
+        self.write_skill(skills, "single-directory", """
+            name: 'o''brien'
+            description: 'single ''quoted'' description'
+        """)
+        self.write_skill(skills, "double-directory", r'''
+            name: "double"
+            description: "first\nsecond\t\"quoted\" and \\ slash"
+        ''')
+        self.write_skill(skills, "literal-directory", """
+            name: |
+              literal
+            description: |
+              first line
+              second   line
+        """)
+        self.write_skill(skills, "folded-directory", """
+            name: >
+              folded
+            description: >
+              folded line
+              next   line
+        """)
+        self.write_skill(skills, "multiline-plain-directory", """
+            name: multi-plain
+            description: first plain line
+              second plain line
+        """)
+        self.write_skill(skills, "multiline-single-directory", """
+            name: 'multi-single'
+            description: 'first single line
+              second single line'
+        """)
+        self.write_skill(skills, "multiline-double-directory", r'''
+            name: "multi-double"
+            description: "first double line
+              second\nline"
+        ''')
+        self.write_skill(skills, "comments-directory", """
+            name: comments # ignored name comment
+            description: plain value # ignored description comment
+        """)
+        self.write_skill(skills, "quoted-comment-directory", """
+            name: "quoted-comment" # ignored trailing comment
+            description: "kept # hash" # ignored trailing comment
+        """)
+
+        result = self.run_cli("show", "default")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout,
+            "alpha — plain description\n"
+            "comments — plain value\n"
+            "double — first second \"quoted\" and \\ slash\n"
+            "folded — folded line next line\n"
+            "literal — first line second line\n"
+            "multi-double — first double line second line\n"
+            "multi-plain — first plain line second plain line\n"
+            "multi-single — first single line second single line\n"
+            "o'brien — single 'quoted' description\n"
+            "quoted-comment — kept # hash\n",
+        )
+        self.assertEqual(result.stderr, "")
+
+    def test_show_reports_malformed_frontmatter_without_hiding_valid_siblings(self):
+        self.initialize()
+        skills = self.root / "skillsets" / "default" / "skills"
+        invalid = {
+            "alias-value": ("name: alias\ndescription: *shared\n", "unsupported"),
+            "anchor-value": ("name: anchor\ndescription: &mark value\n", "unsupported"),
+            "collection-value": ("name: collection\ndescription: [one, two]\n", "unsupported"),
+            "duplicate-description": (
+                "name: duplicate-description\ndescription: first\ndescription: second\n",
+                "duplicate",
+            ),
+            "duplicate-name": (
+                "name: first\nname: second\ndescription: duplicate name\n",
+                "duplicate",
+            ),
+            "empty-description": ("name: empty-description\ndescription: ''\n", "empty"),
+            "empty-name": ("name:\ndescription: empty name\n", "empty"),
+            "escaped-surrogate": (
+                'name: escaped-surrogate\ndescription: "\\uD800"\n',
+                "unicode",
+            ),
+            "missing-description": ("name: missing-description\n", "missing"),
+            "missing-name": ("description: missing name\n", "missing"),
+            "nested-targets": (
+                "metadata:\n  name: nested\n  description: not top level\n",
+                "missing",
+            ),
+            "tag-value": ("name: tag\ndescription: !text tagged\n", "unsupported"),
+            "unterminated-double": (
+                'name: unterminated-double\ndescription: "not closed\n',
+                "unterminated",
+            ),
+            "unterminated-single": (
+                "name: unterminated-single\ndescription: 'not closed\n",
+                "unterminated",
+            ),
+        }
+        for directory, (metadata, _category) in invalid.items():
+            self.write_skill(skills, directory, metadata)
+
+        for directory, contents in {
+            "malformed-delimiter": "----\nname: bad\ndescription: bad\n---\n",
+            "missing-closing": "---\nname: bad\ndescription: bad\n",
+            "no-delimiters": "name: bad\ndescription: bad\n",
+        }.items():
+            skill = skills / directory
+            skill.mkdir()
+            (skill / "SKILL.md").write_text(contents, encoding="utf-8")
+            invalid[directory] = (contents, "frontmatter")
+
+        invalid_utf = skills / "invalid-utf"
+        invalid_utf.mkdir()
+        invalid_utf.joinpath("SKILL.md").write_bytes(
+            b"---\nname: invalid-utf\ndescription: \xff\n---\n"
+        )
+        invalid["invalid-utf"] = ("", "utf")
+        (skills / "missing-skill-file").mkdir()
+        invalid["missing-skill-file"] = ("", "missing")
+        self.write_skill(skills, "valid-sibling-directory", """
+            name: valid-sibling
+            description: remains visible
+        """)
+
+        result = self.run_cli("show", "default")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("valid-sibling — remains visible\n", result.stdout)
+        for directory, (_contents, category) in invalid.items():
+            with self.subTest(directory=directory):
+                self.assert_invalid_show_entry(result.stdout, directory, category)
+        displayed = [line.split(" — ", 1)[0] for line in result.stdout.splitlines()]
+        self.assertEqual(displayed, sorted(displayed))
+
+    def test_show_ignores_regular_files_and_never_follows_direct_skill_symlinks(self):
+        self.initialize()
+        skills = self.root / "skillsets" / "default" / "skills"
+        (skills / "ordinary-file").write_text("not a skill\n", encoding="utf-8")
+        (skills / "missing-skill-file").mkdir()
+        self.write_skill(skills, "valid-directory", """
+            name: valid
+            description: direct real directory
+        """)
+        external = self.home / "external-skill"
+        external.mkdir()
+        external.joinpath("SKILL.md").write_text(
+            "---\nname: external-secret\ndescription: must not be read\n---\n",
+            encoding="utf-8",
+        )
+        (skills / "linked-directory").symlink_to(external, target_is_directory=True)
+        linked_file = skills / "linked-skill-file"
+        linked_file.mkdir()
+        linked_file.joinpath("SKILL.md").symlink_to(external / "SKILL.md")
+
+        result = self.run_cli("show", "default")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("valid — direct real directory\n", result.stdout)
+        self.assertNotIn("ordinary-file", result.stdout)
+        self.assertNotIn("external-secret", result.stdout)
+        self.assert_invalid_show_entry(result.stdout, "missing-skill-file", "missing")
+        self.assert_invalid_show_entry(result.stdout, "linked-directory", "unsupported")
+        self.assert_invalid_show_entry(result.stdout, "linked-skill-file", "unsupported")
+
+    def test_show_rejects_missing_and_invalid_set_names(self):
+        self.initialize()
+        before = self.filesystem_snapshot(self.home)
+
+        missing = self.run_cli("show", "missing")
+        self.assert_refused(missing)
+        for name in ("../escape", "Upper", ".hidden", "two words"):
+            with self.subTest(name=name):
+                result = self.run_cli("show", name)
+                self.assert_refused(result)
+
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_inspection_commands_reject_uninitialized_and_invalid_layouts_read_only(self):
+        commands = (("list",), ("current",), ("show", "default"))
+        for index, arguments in enumerate(commands):
+            with self.subTest(layout="uninitialized", command=arguments[0]):
+                home = self.new_home(f"inspection-uninitialized-{index}")
+                root = home / ".agents"
+                root.mkdir()
+                (root / ".skillset.lock").write_text("", encoding="utf-8")
+                before = self.filesystem_snapshot(home)
+                result = self.run_cli(*arguments, home=home)
+                self.assert_refused(result)
+                self.assertEqual(self.filesystem_snapshot(home), before)
+
+        def replace_link(path, target):
+            path.unlink()
+            path.symlink_to(target)
+
+        mutations = {
+            "skills-alias": lambda root: replace_link(
+                root / "skills", "skillsets/default/skills"
+            ),
+            "lock-alias": lambda root: replace_link(
+                root / ".skill-lock.json", "skillsets/default/.skill-lock.json"
+            ),
+            "active-target": lambda root: replace_link(
+                root / "active", "skillsets/missing"
+            ),
+            "set-shape": lambda root: shutil.rmtree(
+                root / "skillsets" / "default" / "skills"
+            ),
+            "lockfile": lambda root: (
+                root / "skillsets" / "default" / ".skill-lock.json"
+            ).write_text("not json\n", encoding="utf-8"),
+        }
+        case = 0
+        for label, mutate in mutations.items():
+            for arguments in commands:
+                with self.subTest(layout=label, command=arguments[0]):
+                    home = self.new_home(f"inspection-invalid-{case}")
+                    case += 1
+                    root = self.make_managed_layout(home)
+                    (root / ".skillset.lock").write_text("", encoding="utf-8")
+                    mutate(root)
+                    before = self.filesystem_snapshot(home)
+                    result = self.run_cli(*arguments, home=home)
+                    self.assert_refused(result)
+                    self.assertEqual(self.filesystem_snapshot(home), before)
+
+    def test_successful_inspection_commands_are_strictly_read_only(self):
+        self.initialize()
+        self.make_set(self.root, "empty")
+        skills = self.root / "skillsets" / "default" / "skills"
+        self.write_skill(skills, "valid", """
+            name: valid
+            description: snapshot payload
+        """)
+        before = self.filesystem_snapshot(self.home)
+
+        for arguments in (
+            ("list",),
+            ("list", "-v"),
+            ("list", "--verbose"),
+            ("current",),
+            ("show", "default"),
+        ):
+            with self.subTest(arguments=arguments):
+                result = self.run_cli(*arguments)
+                self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+                self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_each_inspection_command_waits_for_the_advisory_lock_without_blind_sleep(self):
+        self.initialize()
+        expected = {
+            ("list",): "* default\n",
+            ("current",): "default\n",
+            ("show", "default"): "",
+        }
+        lock_path = self.root / ".skillset.lock"
+        for index, (arguments, stdout_expected) in enumerate(expected.items()):
+            with self.subTest(command=arguments[0]):
+                attempted = self.sandbox / f"inspection-lock-attempted-{index}"
+                fault = self.fault_environment(
+                    f"""
+                    import fcntl
+                    from pathlib import Path
+                    marker = Path({str(attempted)!r})
+                    original_flock = fcntl.flock
+                    def marked_flock(file, operation):
+                        if operation & fcntl.LOCK_EX:
+                            marker.write_text("attempted", encoding="utf-8")
+                        return original_flock(file, operation)
+                    fcntl.flock = marked_flock
+                    """
+                )
+                process = None
+                with lock_path.open("a+") as lock_file:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX)
+                    process = self.popen_cli(*arguments, extra_environment=fault)
+                    try:
+                        self.wait_for_path(attempted, process)
+                        self.assertIsNone(
+                            process.poll(), f"{arguments} did not block on the lock"
+                        )
+                    finally:
+                        fcntl.flock(lock_file, fcntl.LOCK_UN)
+                try:
+                    stdout, stderr = process.communicate(timeout=5)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.communicate(timeout=2)
+                self.assertEqual(process.returncode, 0, (stdout, stderr))
+                self.assertEqual(stdout, stdout_expected)
+                self.assertEqual(stderr, "")
 
     def test_skills_appends_global_to_scoped_upstream_commands(self):
         self.initialize()
@@ -537,6 +945,12 @@ class SkillsetTests(unittest.TestCase):
             ("create",),
             ("create", "copy", "--from"),
             ("use",),
+            ("list", "extra"),
+            ("list", "--unknown"),
+            ("current", "extra"),
+            ("current", "--verbose"),
+            ("show",),
+            ("show", "default", "extra"),
             ("unknown-command",),
         ]
         for arguments in cases:
