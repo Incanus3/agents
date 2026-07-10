@@ -29,6 +29,14 @@ Include the context needed to resume safely:
 
 Before finalizing a specification, remove placeholders and resolve contradictions or ambiguous requirements.
 
+## Keep planning terminology out of product surfaces
+
+Production code, test names, user-facing documentation, command output, and APIs must remain independent of internal
+phases, beads, tickets, milestones, or implementation sequence. Describe behavior and capability instead.
+
+Planning identifiers belong in trackers, implementation plans, and handoffs. Before completing work, search
+implementation-facing files for leaked planning terminology and replace it with durable domain language.
+
 ## Mirror upstream vocabulary in wrapper CLIs
 
 When a CLI delegates to another CLI, reuse the upstream command verbs and option names wherever the semantics match.
@@ -43,6 +51,26 @@ variables.
 
 Keep related data and metadata together. Switching visible files without their associated metadata can leave management
 commands operating on a different logical state than the files currently in use.
+
+## Create explicit handoffs before context resets
+
+At a clean checkpoint near a context-window boundary, create a concise document under `docs/handoffs/`. Include:
+
+- Committed and uncommitted repository state
+- Latest verification evidence
+- Completed behavior and important safety invariants
+- Remaining tracker issue and exact scope
+- Known caveats and unresolved decisions
+- A copy-ready resume prompt with workflow and verification instructions
+
+Prefer a handoff after a verified checkpoint rather than in the middle of an edit or debugging loop. Keep the document
+self-contained enough for a fresh session, and remove or archive it when it is no longer useful.
+
+## Load specialized guidance only when relevant
+
+When work involves transactional filesystem operations, rollback, persistent staging markers, resource ownership, or
+transparent CLI delegation, read `docs/guides/transactional-cli-safety.md` before designing or reviewing the change.
+Keep specialized implementation guidance out of the baseline rules so unrelated sessions do not need to load it.
 
 ## Treat rewriting pushed Jujutsu history as exceptional
 
