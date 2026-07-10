@@ -32,6 +32,7 @@ def parser():
     create_parser = commands.add_parser("create", help="create a skillset")
     create_parser.add_argument("name")
     create_parser.add_argument(
+        "-f",
         "--from",
         dest="source",
         metavar="SOURCE",

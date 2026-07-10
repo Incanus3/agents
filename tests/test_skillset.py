@@ -1944,6 +1944,7 @@ class SkillsetTests(unittest.TestCase):
             ("empty-before", ("create", "--use", "empty-before"), False),
             ("clone-after", ("create", "clone-after", "--from", "default", "--use"), True),
             ("clone-before", ("create", "--use", "--from", "default", "clone-before"), True),
+            ("clone-short", ("create", "clone-short", "-f", "default", "--use"), True),
         )
         for index, (name, arguments, cloned) in enumerate(cases):
             home = self.new_home(f"create-use-{index}")
@@ -2018,6 +2019,7 @@ class SkillsetTests(unittest.TestCase):
     def test_create_help_documents_create_options(self):
         result = self.run_cli("create", "--help")
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("-f SOURCE", result.stdout)
         self.assertIn("--from SOURCE", result.stdout)
         self.assertIn("clone from an existing skillset", result.stdout)
         self.assertIn("--use", result.stdout)
