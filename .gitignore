@@ -6,3 +6,5 @@
 .skillset.lock
 .skillset-use.staging
 skillsets/.skillset-create-*.staging
+
+__pycache__
