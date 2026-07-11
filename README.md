@@ -120,13 +120,16 @@ $ skillset list
 experiment
 ```
 
-Verbose output with either `-v` or `--verbose` adds a tab followed by sorted
-valid declared skill names, or `(no skills)` when none are valid:
+Verbose output with either `-v` or `--verbose` uses an aligned inventory table.
+Valid entries use declared skill names; malformed entries use their directory name
+followed by `[invalid: REASON]`. A set with no inspectable entries shows `(no skills)`:
 
 ```text
 $ skillset list --verbose
-* default	alpha, zeta
-experiment	(no skills)
+  SKILLSET   | SKILLS
+  -----------|---------------------------------------------
+* default    | alpha, broken [invalid: missing description]
+  experiment | (no skills)
 ```
 
 Print only the active name and its terminating newline for use in scripts:
@@ -151,12 +154,14 @@ skillset, while an explicit name inspects that set whether it is active or
 inactive. Non-empty sets use the headered, aligned `SKILL | DESCRIPTION` table
 shown above. An empty set prints `No skills installed.` without table headers.
 
-When stdout is a TTY, `NO_COLOR` is absent, and `TERM` is not `dumb`, `show`
-makes both header cells bold and valid skill names cyan. It colors
-`[invalid: missing description]` yellow and every other invalid description red,
-makes every row's `|` delimiter and the complete separator dim, and also dims the
-empty-set message. All non-TTY output, including pipes and redirects, is plain
-text; `NO_COLOR` and `TERM=dumb` also suppress ANSI styling.
+When stdout is a TTY, `NO_COLOR` is absent, and `TERM` is not `dumb`, verbose
+`list` and `show` make both header cells bold and valid skill names cyan. They
+color `[invalid: missing description]` annotations yellow and every other invalid
+annotation red, and dim every row's `|` delimiter and the complete separator.
+Verbose `list` also makes the active marker and skillset name bold cyan and dims
+`(no skills)`; `show` dims its empty-set message. All non-TTY output, including
+pipes and redirects, is plain text; `NO_COLOR` and `TERM=dumb` also suppress ANSI
+styling.
 
 `show` reads UTF-8 `SKILL.md` files whose first line is exactly `---` and that
 have a later exact `---` closing line. Before that close, top-level `name` and
@@ -169,13 +174,15 @@ quotes. It ignores extra keys and the body, and collapses whitespace in both
 displayed values.
 
 Malformed, non-UTF-8, or invalid decoded-Unicode candidates remain visible in
-the table as `<directory> | [invalid: <reason>]`; verbose `list` omits them.
-Direct regular files are ignored. Direct skill-directory symlinks and
-`SKILL.md` symlinks are never followed. Declared names and descriptions preserve
-ordinary printable Unicode, while terminal controls, invisible format controls,
-and line/paragraph separators are rendered as deterministic `\xNN`, `\uNNNN`,
-or `\UNNNNNNNN` escapes. Wrapper-created tabs, table delimiters, and line
-endings remain unchanged.
+the `show` table as `<directory> | [invalid: <reason>]` and in verbose `list` as
+`<directory> [invalid: <reason>]` inventory entries. Verbose `list` uses
+`(no skills)` only when inspection finds no valid or invalid skill-directory
+entries; ignored direct regular files do not prevent this state. Direct
+skill-directory symlinks and `SKILL.md` symlinks are never followed. Declared
+names and descriptions preserve ordinary printable Unicode, while terminal
+controls, invisible format controls, and line/paragraph separators are rendered
+as deterministic `\xNN`, `\uNNNN`, or `\UNNNNNNNN` escapes. Wrapper-created
+table delimiters and line endings remain unchanged.
 
 ## Diagnose the managed layout
 

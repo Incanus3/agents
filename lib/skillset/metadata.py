@@ -217,21 +217,94 @@ def inspect_skills(skills):
     return inspected
 
 
-def list_sets(root, verbose):
+def skill_entry_text(entry):
+    display_name, annotation, _reason = entry
+    return display_name if annotation is None else f"{display_name} {annotation}"
+
+
+def verbose_skill_entries(skills):
+    entries = []
+    for directory, declared, _description, reason in inspect_skills(skills):
+        if reason is None:
+            display_name = printable_text(declared)
+            annotation = None
+        else:
+            display_name = printable_text(directory)
+            annotation = f"[invalid: {reason}]"
+        entries.append((display_name, annotation, reason))
+    return sorted(entries, key=lambda entry: (entry[0], skill_entry_text(entry)))
+
+
+def verbose_list_rows(root, names, active_name):
+    return [
+        (
+            name == active_name,
+            printable_text(name),
+            verbose_skill_entries(set_path(root, name) / "skills"),
+        )
+        for name in names
+    ]
+
+
+def render_skill_entries(entries, colored):
+    if not entries:
+        return styled("(no skills)", DIM, colored)
+    rendered = []
+    for display_name, annotation, reason in entries:
+        if rendered:
+            rendered.append(", ")
+        if reason is None:
+            rendered.append(styled(display_name, CYAN, colored))
+            continue
+        rendered.append(display_name + " ")
+        code = YELLOW if reason == "missing description" else RED
+        rendered.append(styled(annotation, code, colored))
+    return "".join(rendered)
+
+
+def render_verbose_list(rows, output):
+    colored = color_enabled(output)
+    skill_cells = [
+        ", ".join(skill_entry_text(entry) for entry in entries)
+        if entries
+        else "(no skills)"
+        for _active, _name, entries in rows
+    ]
+    left_width = max(display_width("SKILLSET"), *(display_width(row[1]) for row in rows))
+    right_width = max(display_width("SKILLS"), *(display_width(cell) for cell in skill_cells))
+    divider = styled("|", DIM, colored)
+    header_left = styled("SKILLSET", BOLD, colored)
+    header_left += " " * (left_width - display_width("SKILLSET"))
+    print(f"  {header_left} {divider} {styled('SKILLS', BOLD, colored)}", file=output)
+    separator = "  " + "-" * (left_width + 1) + "|" + "-" * (right_width + 1)
+    width = terminal_width(output)
+    if width is not None:
+        separator = separator[:width]
+    print(styled(separator, DIM, colored), file=output)
+    for active, name, entries in rows:
+        if active:
+            marker = styled("*", BOLD + CYAN, colored) + " "
+            left_cell = styled(name, BOLD + CYAN, colored)
+        else:
+            marker = "  "
+            left_cell = name
+        left_cell += " " * (left_width - display_width(name))
+        print(
+            f"{marker}{left_cell} {divider} {render_skill_entries(entries, colored)}",
+            file=output,
+        )
+
+
+def list_sets(root, verbose, output=None):
+    output = sys.stdout if output is None else output
     active_name = validate_layout(root)
     names = sorted(entry.name for entry in (root / "skillsets").iterdir())
-    for name in names:
-        marker = "* " if name == active_name else ""
-        line = f"{marker}{name}"
-        if verbose:
-            skills = inspect_skills(set_path(root, name) / "skills")
-            declared = sorted(
-                printable_text(name)
-                for _directory, name, _description, reason in skills
-                if reason is None
-            )
-            line += "\t" + (", ".join(declared) if declared else "(no skills)")
-        print(line)
+    if not verbose:
+        for name in names:
+            marker = "* " if name == active_name else ""
+            print(f"{marker}{name}", file=output)
+        return
+    render_verbose_list(verbose_list_rows(root, names, active_name), output)
 
 
 def current(root):

@@ -1038,7 +1038,7 @@ class SkillsetTests(unittest.TestCase):
         self.assertEqual(result.stdout, "alpha\n* middle\nzeta\n")
         self.assertEqual(result.stderr, "")
 
-    def test_list_supports_both_verbose_flags_with_sorted_valid_declared_names(self):
+    def test_verbose_list_prints_aligned_complete_inventory_for_both_flags(self):
         self.initialize()
         empty = self.make_set(self.root, "empty")
         skills = self.root / "skillsets" / "default" / "skills"
@@ -1056,13 +1056,150 @@ class SkillsetTests(unittest.TestCase):
         (skills / "ordinary-file.txt").write_text("ignored\n", encoding="utf-8")
         self.assertEqual(list((empty / "skills").iterdir()), [])
 
-        expected = "* default\talpha, zeta\nempty\t(no skills)\n"
+        skills_cell = "alpha, malformed [invalid: missing description], zeta"
+        expected = (
+            "  SKILLSET | SKILLS\n"
+            "  ---------|" + "-" * (len(skills_cell) + 1) + "\n"
+            f"* default  | {skills_cell}\n"
+            "  empty    | (no skills)\n"
+        )
         for flag in ("-v", "--verbose"):
             with self.subTest(flag=flag):
                 result = self.run_cli("list", flag)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, expected)
                 self.assertEqual(result.stderr, "")
+                self.assertNotIn("\x1b", result.stdout)
+
+    def test_verbose_list_colorizes_independent_segments_only_for_eligible_tty(self):
+        self.initialize()
+        self.make_set(self.root, "empty")
+        skills = self.root / "skillsets/default/skills"
+        self.write_skill(skills, "valid", "name: alpha\ndescription: valid")
+        self.write_skill(skills, "warning", "name: warning")
+        (skills / "error").mkdir()
+
+        colored = self.run_cli_tty("list", "-v")
+
+        self.assertEqual(colored.returncode, 0, colored.stderr)
+        self.assertIn("\x1b[1mSKILLSET\x1b[0m", colored.stdout)
+        self.assertIn("\x1b[2m|\x1b[0m", colored.stdout)
+        self.assertRegex(colored.stdout, r"\x1b\[2m  -+\|-+\x1b\[0m")
+        self.assertIn("\x1b[1m\x1b[36m*\x1b[0m ", colored.stdout)
+        self.assertIn("\x1b[1m\x1b[36mdefault\x1b[0m", colored.stdout)
+        self.assertIn("\x1b[36malpha\x1b[0m, error ", colored.stdout)
+        self.assertIn("\x1b[31m[invalid: missing SKILL.md]\x1b[0m", colored.stdout)
+        self.assertIn("\x1b[33m[invalid: missing description]\x1b[0m", colored.stdout)
+        self.assertIn("\x1b[2m(no skills)\x1b[0m", colored.stdout)
+
+        plain = self.run_cli("list", "-v")
+        self.assertNotIn("\x1b", plain.stdout)
+
+    def test_verbose_list_tty_escapes_controls_without_unapproved_sgr(self):
+        self.initialize()
+        skills = self.root / "skillsets/default/skills"
+        controls = "\x1b\x7f\x9b\u202e\u2066"
+        declared = f"valid{controls}name"
+        directory = f"broken{controls}name"
+        self.write_skill(skills, "valid", f"name: {declared}\ndescription: valid")
+        (skills / directory).mkdir()
+
+        result = self.run_cli_tty("list", "-v")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        escaped_declared = r"valid\x1b\x7f\x9b\u202e\u2066name"
+        escaped_directory = r"broken\x1b\x7f\x9b\u202e\u2066name"
+        self.assertIn(escaped_declared, result.stdout)
+        self.assertIn(escaped_directory, result.stdout)
+        self.assertIn(f"\x1b[36m{escaped_declared}\x1b[0m", result.stdout)
+        self.assertIn(
+            f"{escaped_directory} \x1b[31m[invalid: missing SKILL.md]\x1b[0m",
+            result.stdout,
+        )
+        for raw in ("\x7f", "\x9b", "\u202e", "\u2066"):
+            self.assertNotIn(raw, result.stdout)
+        without_allowed_sgr = result.stdout
+        for sgr in (
+            "\x1b[0m",
+            "\x1b[1m",
+            "\x1b[2m",
+            "\x1b[31m",
+            "\x1b[33m",
+            "\x1b[36m",
+        ):
+            without_allowed_sgr = without_allowed_sgr.replace(sgr, "")
+        self.assertNotIn("\x1b", without_allowed_sgr)
+
+    def test_verbose_list_tty_color_honors_environment_opt_outs(self):
+        self.initialize()
+        self.write_skill(
+            self.root / "skillsets/default/skills",
+            "valid",
+            "name: alpha\ndescription: valid",
+        )
+        plain = self.run_cli("list", "-v").stdout
+        for extra_environment in ({"NO_COLOR": "1"}, {"TERM": "dumb"}):
+            with self.subTest(environment=extra_environment):
+                result = self.run_cli_tty(
+                    "list", "-v", extra_environment=extra_environment
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, plain)
+                self.assertNotIn("\x1b", result.stdout)
+
+    def test_verbose_list_caps_only_tty_separator_and_keeps_one_complete_data_line(self):
+        self.initialize()
+        declared = "a-very-long-skill-name-that-remains-complete"
+        self.write_skill(
+            self.root / "skillsets/default/skills",
+            "valid",
+            f"name: {declared}\ndescription: valid",
+        )
+
+        colored = self.run_cli_tty("list", "-v", terminal_columns=20)
+
+        self.assertEqual(colored.returncode, 0, colored.stderr)
+        self.assertEqual(
+            colored.stdout.splitlines()[1],
+            "\x1b[2m  ---------|--------\x1b[0m",
+        )
+        self.assertEqual(len(colored.stdout.splitlines()), 3)
+        self.assertIn(declared, colored.stdout.splitlines()[2])
+
+        captured = self.run_cli("list", "-v")
+        self.assertEqual(captured.returncode, 0, captured.stderr)
+        self.assertEqual(
+            captured.stdout.splitlines()[1],
+            "  ---------|" + "-" * (len(declared) + 1),
+        )
+
+    def test_verbose_list_does_not_call_an_invalid_only_set_empty(self):
+        self.initialize()
+        broken = self.make_set(self.root, "broken-only")
+        self.write_skill(broken / "skills", "malformed", "name: hidden")
+
+        result = self.run_cli("list", "-v")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "  broken-only | malformed [invalid: missing description]\n",
+            result.stdout,
+        )
+        self.assertNotIn("  broken-only | (no skills)\n", result.stdout)
+
+    def test_verbose_list_measures_wide_and_combining_skill_names_by_display_cell(self):
+        self.initialize()
+        skills = self.root / "skillsets/default/skills"
+        combining = "e\u0301" * 6
+        self.write_skill(skills, "combining", f"name: {combining}\ndescription: valid")
+        self.write_skill(skills, "wide", "name: 界界界\ndescription: valid")
+
+        result = self.run_cli("list", "-v")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[1], "  ---------|" + "-" * 15)
+        self.assertEqual(result.stdout.splitlines()[2], f"* default  | {combining}, 界界界")
 
     def test_verbose_list_visibly_escapes_declared_name_terminal_controls(self):
         self.initialize()
@@ -1082,13 +1219,33 @@ class SkillsetTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         for raw in ("\x1b", "\x7f", "\x9b", "\u202e", "\u2066"):
             self.assertNotIn(raw, result.stdout)
+        displayed = r"jalapeño\x1b\x7f\u202eoutil"
         self.assertEqual(
             result.stdout,
-            "* default\tjalapeño\\x1b\\x7f\\u202eoutil\n",
+            "  SKILLSET | SKILLS\n"
+            "  ---------|" + "-" * (len(displayed) + 1) + "\n"
+            f"* default  | {displayed}\n",
         )
         self.assertIn("jalapeño", result.stdout)
-        self.assertIn("\t", result.stdout)
+        self.assertNotIn("\t", result.stdout)
         self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_verbose_list_visibly_escapes_invalid_directory_terminal_controls(self):
+        self.initialize()
+        skills = self.root / "skillsets/default/skills"
+        directory = "broken\x1b\x7f\u202ename"
+        (skills / directory).mkdir()
+
+        result = self.run_cli("list", "--verbose")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        for raw in ("\x1b", "\x7f", "\u202e"):
+            self.assertNotIn(raw, result.stdout)
+        self.assertIn(
+            r"broken\x1b\x7f\u202ename [invalid: missing SKILL.md]",
+            result.stdout,
+        )
 
     def test_current_prints_exact_active_name_before_and_after_use(self):
         self.initialize("default")

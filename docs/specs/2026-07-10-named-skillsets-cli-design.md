@@ -136,8 +136,9 @@ Commands other than `init` require a valid managed layout. No create, init, or r
 ### Inspection
 
 - `skillset list` prints sets in name order, one per line, and marks the active set with `*`.
-- `skillset list -v` and `skillset list --verbose` append sorted valid declared skill names on the same line. Empty sets
-  show `(no skills)`; malformed entries are omitted here and remain visible through `show` and `doctor`.
+- `skillset list -v` and `skillset list --verbose` render a headered, aligned `SKILLSET | SKILLS` table with the active
+  `* ` gutter. Each set's sorted valid names and invalid `DIRECTORY [invalid: REASON]` entries stay on one line; a truly
+  empty inventory shows `(no skills)`. Automatic color is TTY-only and is suppressed by `NO_COLOR` and `TERM=dumb`.
 - `skillset current` prints only the active set name plus a newline, suitable for command substitution.
 - `skillset show [NAME]` defaults to the active set when `NAME` is omitted; an explicit name inspects that set. Non-empty
   output is a headered, aligned `SKILL | DESCRIPTION` table, while an empty set prints `No skills installed.`. Invalid
