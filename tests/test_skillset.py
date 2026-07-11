@@ -417,6 +417,26 @@ class SkillsetTests(unittest.TestCase):
         self.assertIn("complete", result.stdout)
         self.assertEqual(self.filesystem_snapshot(self.home), before)
 
+    def test_completion_scripts_include_the_complete_wrapper_grammar(self):
+        commands = (
+            "init", "create", "use", "rename", "remove", "list",
+            "current", "show", "doctor", "skills", "completions",
+        )
+        for shell in ("bash", "zsh", "fish"):
+            with self.subTest(shell=shell):
+                script = self.run_cli("completions", shell).stdout
+                for command in commands:
+                    self.assertIn(command, script)
+                options = (
+                    ("-l help", "-l from", "-l use", "-l yes", "-l verbose")
+                    if shell == "fish"
+                    else ("--help", "--from", "--use", "--yes", "--verbose")
+                )
+                for option in options:
+                    self.assertIn(option, script)
+                self.assertIn("skillset list", script)
+                self.assertIn("2>/dev/null", script)
+
     def test_bash_completion_is_contextual_and_uses_managed_names(self):
         bash = shutil.which("bash")
         self.assertIsNotNone(bash)
@@ -460,6 +480,36 @@ printf 'skills:%s\n' "${#COMPREPLY[@]}"'''
                 "terminator:0", "skills:0",
             ],
         )
+
+    def test_fish_completion_is_contextual_and_uses_managed_names(self):
+        fish = shutil.which("fish")
+        if fish is None:
+            self.skipTest("fish is not installed")
+        self.initialize()
+        self.make_set(self.root, "demo")
+        generated = self.run_cli("completions", "fish")
+        script = self.sandbox / "skillset.fish"
+        script.write_text(generated.stdout, encoding="utf-8")
+        environment = self.environment(extra={
+            "PATH": f"{REPOSITORY_ROOT / 'bin'}:{os.environ.get('PATH', '')}"
+        })
+
+        def candidates(commandline):
+            result = subprocess.run(
+                [fish, "-c", "source $argv[1]; complete -C $argv[2]", str(script), commandline],
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return [line.split("\t", 1)[0] for line in result.stdout.splitlines()]
+
+        self.assertIn("show", candidates("skillset sh"))
+        self.assertEqual(candidates("skillset use d"), ["default", "demo"])
+        self.assertEqual(candidates("skillset create --from d"), ["default", "demo"])
+        self.assertEqual(candidates("skillset rename default n"), [])
+        self.assertEqual(candidates("skillset skills l"), [])
 
     def test_generated_completion_scripts_pass_available_shell_syntax_checks(self):
         checked = []
