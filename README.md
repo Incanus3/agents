@@ -20,6 +20,19 @@ export PATH="$HOME/.agents/bin:$PATH"
 fish_add_path "$HOME/.agents/bin"
 ```
 
+## Use an alternate home directory
+
+`skillset` stores its managed data under `$HOME/.agents`. To operate on a
+different home directory for a single command, override `HOME` for that command:
+
+```sh
+HOME=/path/to/alternate-home skillset list
+```
+
+This reads the managed layout from `/path/to/alternate-home/.agents`. The
+alternate home directory must already exist. The override also applies to any
+upstream `skills` command delegated through `skillset skills`.
+
 ## Shell completions
 
 Load completions for the current shell session:
