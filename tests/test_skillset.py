@@ -417,6 +417,50 @@ class SkillsetTests(unittest.TestCase):
         self.assertIn("complete", result.stdout)
         self.assertEqual(self.filesystem_snapshot(self.home), before)
 
+    def test_bash_completion_is_contextual_and_uses_managed_names(self):
+        bash = shutil.which("bash")
+        self.assertIsNotNone(bash)
+        self.initialize()
+        self.make_set(self.root, "demo")
+        generated = self.run_cli("completions", "bash")
+        script = self.sandbox / "skillset.bash"
+        script.write_text(generated.stdout, encoding="utf-8")
+        environment = self.environment(
+            extra={"PATH": f"{REPOSITORY_ROOT / 'bin'}:{os.environ.get('PATH', '')}"}
+        )
+        probe = r'''source "$1"
+COMP_WORDS=(skillset sh); COMP_CWORD=1; _skillset_completion
+printf 'top:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(skillset use d); COMP_CWORD=2; _skillset_completion
+printf 'use:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(skillset create --from=d); COMP_CWORD=2; _skillset_completion
+printf 'from:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(skillset create --from d); COMP_CWORD=3; _skillset_completion
+printf 'from-separated:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(skillset rename default n); COMP_CWORD=3; _skillset_completion
+printf 'new:%s\n' "${#COMPREPLY[@]}"
+COMP_WORDS=(skillset use -- -); COMP_CWORD=3; _skillset_completion
+printf 'terminator:%s\n' "${#COMPREPLY[@]}"
+COMP_WORDS=(skillset skills l); COMP_CWORD=2; _skillset_completion
+printf 'skills:%s\n' "${#COMPREPLY[@]}"'''
+        result = subprocess.run(
+            [bash, "-c", probe, "bash", str(script)],
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "top:show", "use:default demo",
+                "from:--from=default --from=demo",
+                "from-separated:default demo", "new:0",
+                "terminator:0", "skills:0",
+            ],
+        )
+
     def test_generated_completion_scripts_pass_available_shell_syntax_checks(self):
         checked = []
         for shell in ("bash", "zsh", "fish"):
