@@ -437,6 +437,26 @@ class SkillsetTests(unittest.TestCase):
                 self.assertIn("skillset list", script)
                 self.assertIn("2>/dev/null", script)
 
+    def test_zsh_completion_uses_stateful_nested_parser_contract(self):
+        generated = self.run_cli("completions", "zsh")
+
+        self.assertEqual(generated.returncode, 0, generated.stderr)
+        self.assertEqual(generated.stderr, "")
+        script = generated.stdout
+        self.assertIn('case "${words[1]}" in', script)
+        self.assertNotIn('case "${words[2]}" in', script)
+        self.assertIn("{-f,--from=}'[clone from an existing skillset]", script)
+        self.assertNotIn("{-f,--from}'[clone from an existing skillset]", script)
+        outer_parser, nested_parsers = script.split('case "${words[1]}" in', 1)
+        self.assertIn("_arguments -S -C \\", outer_parser)
+        self.assertEqual(outer_parser.count("_arguments"), 1)
+        self.assertEqual(nested_parsers.count("_arguments"), 9)
+        self.assertEqual(nested_parsers.count("_arguments -S"), 9)
+        self.assertEqual(script.count("_arguments"), 10)
+        self.assertEqual(script.count("_arguments -S"), 10)
+        self.assertEqual(script.count("_arguments -S -C"), 1)
+        self.assertIn("skills) return 0 ;;", script)
+
     def test_bash_completion_is_contextual_and_uses_managed_names(self):
         bash = shutil.which("bash")
         self.assertIsNotNone(bash)
@@ -530,6 +550,24 @@ printf 'skills:%s\n' "${#COMPREPLY[@]}"'''
                 )
                 self.assertEqual(parsed.returncode, 0, parsed.stderr)
         self.assertIn("bash", checked)
+
+    def test_generated_zsh_completion_script_passes_syntax_check(self):
+        zsh = shutil.which("zsh")
+        if zsh is None:
+            self.skipTest("zsh is not installed")
+
+        generated = self.run_cli("completions", "zsh")
+
+        self.assertEqual(generated.returncode, 0, generated.stderr)
+        self.assertEqual(generated.stderr, "")
+        parsed = subprocess.run(
+            [zsh, "-n"],
+            input=generated.stdout,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
 
     def test_doctor_accepts_healthy_state_without_mutation_or_findings(self):
         self.initialize()
@@ -2291,6 +2329,7 @@ printf 'skills:%s\n' "${#COMPREPLY[@]}"'''
             ("doctor", "extra"),
             ("completions",),
             ("completions", "powershell"),
+            ("completions", "--powershell"),
             ("completions", "bash", "extra"),
             ("unknown-command",),
         ]

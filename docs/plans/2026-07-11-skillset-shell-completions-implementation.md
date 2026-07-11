@@ -516,7 +516,7 @@ _skillset_names() {
 _skillset() {
     local context state state_descr line
     typeset -A opt_args
-    _arguments -C \
+    _arguments -S -C \
         '(-h --help)'{-h,--help}'[show help]' \
         '1:command:->command' \
         '*::argument:->arguments' && return 0
@@ -540,43 +540,43 @@ _skillset() {
             _describe 'skillset command' commands
             ;;
         arguments)
-            case "${words[2]}" in
+            case "${words[1]}" in
                 init)
-                    _arguments '(-h --help)'{-h,--help}'[show help]' '1:name:'
+                    _arguments -S '(-h --help)'{-h,--help}'[show help]' '1:name:'
                     ;;
                 create)
-                    _arguments \
+                    _arguments -S \
                         '(-h --help)'{-h,--help}'[show help]' \
-                        '(-f --from)'{-f,--from}'[clone from an existing skillset]:source skillset:->skillsets' \
+                        '(-f --from)'{-f,--from=}'[clone from an existing skillset]:source skillset:->skillsets' \
                         '--use[activate the created skillset]' \
                         '1:name:'
                     ;;
                 use)
-                    _arguments '(-h --help)'{-h,--help}'[show help]' '1:name:->skillsets'
+                    _arguments -S '(-h --help)'{-h,--help}'[show help]' '1:name:->skillsets'
                     ;;
                 rename)
-                    _arguments \
+                    _arguments -S \
                         '(-h --help)'{-h,--help}'[show help]' \
                         '1:old name:->skillsets' '2:new name:'
                     ;;
                 remove)
-                    _arguments \
+                    _arguments -S \
                         '(-h --help)'{-h,--help}'[show help]' \
                         '--yes[skip confirmation]' '1:name:->skillsets'
                     ;;
                 list)
-                    _arguments \
+                    _arguments -S \
                         '(-h --help)'{-h,--help}'[show help]' \
                         '(-v --verbose)'{-v,--verbose}'[show skill inventory]'
                     ;;
                 current|doctor)
-                    _arguments '(-h --help)'{-h,--help}'[show help]'
+                    _arguments -S '(-h --help)'{-h,--help}'[show help]'
                     ;;
                 show)
-                    _arguments '(-h --help)'{-h,--help}'[show help]' '1::name:->skillsets'
+                    _arguments -S '(-h --help)'{-h,--help}'[show help]' '1::name:->skillsets'
                     ;;
                 completions)
-                    _arguments '(-h --help)'{-h,--help}'[show help]' '1:shell:(bash zsh fish)'
+                    _arguments -S '(-h --help)'{-h,--help}'[show help]' '1:shell:(bash zsh fish)'
                     ;;
                 skills) return 0 ;;
             esac
@@ -593,6 +593,8 @@ compdef _skillset skillset
 ```
 
 Keep delegated `skills` arguments out of nested `_arguments`; otherwise Zsh may fall back to file candidates.
+The outer `*::` action rewrites `words` to normal arguments, so nested dispatch uses `words[1]`. `-S` makes `--` an
+option terminator, and the `--from=` optspec accepts both `--from VALUE` and `--from=VALUE`.
 
 - [ ] **Step 4: Replace the Fish template**
 
@@ -683,6 +685,8 @@ Run the Step 2 command, then:
 
 ```sh
 python3 -m unittest -v \
+  tests.test_skillset.SkillsetTests.test_zsh_completion_uses_stateful_nested_parser_contract \
+  tests.test_skillset.SkillsetTests.test_generated_zsh_completion_script_passes_syntax_check \
   tests.test_skillset.SkillsetTests.test_bash_completion_is_contextual_and_uses_managed_names \
   tests.test_skillset.SkillsetTests.test_generated_completion_scripts_pass_available_shell_syntax_checks \
   tests.test_skillset.SkillsetTests.test_completions_bypass_malformed_managed_state_without_mutation

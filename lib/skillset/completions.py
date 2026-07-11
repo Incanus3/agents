@@ -112,7 +112,7 @@ _skillset_names() {
 _skillset() {
     local context state state_descr line
     typeset -A opt_args
-    _arguments -C \
+    _arguments -S -C \
         '(-h --help)'{-h,--help}'[show help]' \
         '1:command:->command' \
         '*::argument:->arguments' && return 0
@@ -136,43 +136,43 @@ _skillset() {
             _describe 'skillset command' commands
             ;;
         arguments)
-            case "${words[2]}" in
+            case "${words[1]}" in
                 init)
-                    _arguments '(-h --help)'{-h,--help}'[show help]' '1:name:'
+                    _arguments -S '(-h --help)'{-h,--help}'[show help]' '1:name:'
                     ;;
                 create)
-                    _arguments \
+                    _arguments -S \
                         '(-h --help)'{-h,--help}'[show help]' \
-                        '(-f --from)'{-f,--from}'[clone from an existing skillset]:source skillset:->skillsets' \
+                        '(-f --from)'{-f,--from=}'[clone from an existing skillset]:source skillset:->skillsets' \
                         '--use[activate the created skillset]' \
                         '1:name:'
                     ;;
                 use)
-                    _arguments '(-h --help)'{-h,--help}'[show help]' '1:name:->skillsets'
+                    _arguments -S '(-h --help)'{-h,--help}'[show help]' '1:name:->skillsets'
                     ;;
                 rename)
-                    _arguments \
+                    _arguments -S \
                         '(-h --help)'{-h,--help}'[show help]' \
                         '1:old name:->skillsets' '2:new name:'
                     ;;
                 remove)
-                    _arguments \
+                    _arguments -S \
                         '(-h --help)'{-h,--help}'[show help]' \
                         '--yes[skip confirmation]' '1:name:->skillsets'
                     ;;
                 list)
-                    _arguments \
+                    _arguments -S \
                         '(-h --help)'{-h,--help}'[show help]' \
                         '(-v --verbose)'{-v,--verbose}'[show skill inventory]'
                     ;;
                 current|doctor)
-                    _arguments '(-h --help)'{-h,--help}'[show help]'
+                    _arguments -S '(-h --help)'{-h,--help}'[show help]'
                     ;;
                 show)
-                    _arguments '(-h --help)'{-h,--help}'[show help]' '1::name:->skillsets'
+                    _arguments -S '(-h --help)'{-h,--help}'[show help]' '1::name:->skillsets'
                     ;;
                 completions)
-                    _arguments '(-h --help)'{-h,--help}'[show help]' '1:shell:(bash zsh fish)'
+                    _arguments -S '(-h --help)'{-h,--help}'[show help]' '1:shell:(bash zsh fish)'
                     ;;
                 skills) return 0 ;;
             esac

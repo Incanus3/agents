@@ -17,7 +17,10 @@ delegated through `skillset skills` remain opaque.
 - At design start, Jujutsu reported a clean working copy at an empty commit after `Improve verbose skillset listing
   output`. Bead `agents-ph3` tracks implementation; creating it changed tracker state after design began.
 
-No external research or new runtime dependency is required.
+No new runtime dependency is required. Final implementation review consulted the official Zsh 5.9.1 completion-system
+documentation at <https://zsh.sourceforge.io/Doc/Release/Completion-System.html>. It confirms that a `*::` action
+rewrites `words` and `CURRENT` to normal arguments, `_arguments -S` treats `--` as an option terminator, and a
+`--from=` option specification accepts both separated and equals-sign arguments.
 
 ## Public command contract
 
@@ -115,8 +118,9 @@ Update `tests/test_skillset.py` to establish:
 5. Missing, unsupported, and extra shell arguments exit 2.
 6. Every script represents all public subcommands, relevant options, supported shell names, dynamic-name lookup, stderr
    suppression, and opaque delegated arguments.
-7. Generated output passes `bash -n`, `zsh -n`, or `fish -n` when that executable is installed. Static contract tests
-   remain mandatory when an optional shell executable is unavailable.
+7. Generated output passes `bash -n`, `zsh -n`, or `fish -n` when that executable is installed. An unavailable Zsh
+   executable is reported as an explicit skipped test. Static Zsh contracts lock rewritten-word dispatch, `--from=`
+   support, option-terminator parsing, and opaque delegation when runtime Zsh behavior cannot be exercised.
 8. Bash behavior is tested in a subprocess by sourcing the output, setting completion context, and asserting static and
    dynamic candidates. Add equivalent noninteractive Fish and Zsh behavior tests where their native APIs are reliable.
 9. Existing lock, read-only inspection, delegation, help, workflow, and usage-error tests continue to pass.
