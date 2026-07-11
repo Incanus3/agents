@@ -110,47 +110,47 @@ skillset use experiment
 Activation atomically retargets `~/.agents/active`; the stable `skills` and
 `.skill-lock.json` aliases remain unchanged.
 
-## Rename skillsets
+## Install and maintain skills
 
-Rename an inactive set without changing the active aliases:
-
-```sh
-skillset rename experiment trial
-```
-
-The active set can be renamed with the same command:
+After activating the intended set, run upstream commands through the wrapper:
 
 ```sh
-skillset rename default baseline
+skillset skills add SOURCE
+skillset skills list
+skillset skills remove SKILL
+skillset skills update
 ```
 
-An active rename moves the complete set first and then atomically retargets
-`~/.agents/active`; the stable root aliases remain unchanged. Rename refuses
-any existing destination, including files and symlinks, without overwriting it.
-If active retargeting fails before it commits, the directory rename is rolled
-back. If rollback cannot restore a valid layout, the error names the old, new,
-and active paths and identifies the remaining data location. Preserve that copy
-and inspect the reported state before either moving the set back or retargeting
-`active`; then run `skillset doctor`.
-
-## Remove skillsets
-
-Remove an inactive set with an interactive confirmation:
-
-```text
-$ skillset remove trial
-Remove skillset 'trial'? [y/N] yes
-```
-
-Only `y` or `yes`, ignoring case and surrounding whitespace, confirms removal.
-Use `--yes` for noninteractive operation:
+For `add`, `list`/`ls`, `remove`/`rm`, and `update`, the wrapper injects
+`--global` unless exact `-g` or `--global` is already present before an option
+terminator. It inserts the flag before `--`, or appends it when no terminator is
+present. Exact `-p` and `--project` options are rejected for those commands
+because managed skillsets contain global state; tokens after `--` remain
+literals. Scope-free `find`, `use`, and upstream `init` commands, as well as an
+invocation with no upstream arguments, pass through unchanged:
 
 ```sh
-skillset remove trial --yes
+skillset skills find formatter
+skillset skills use SKILL
 ```
 
-The active set is always refused, even with `--yes`. Activate another set with
-`skillset use` before removing it.
+Unknown upstream commands also pass through unchanged, but the wrapper warns
+on stderr that global scope was not injected. It does not reinterpret other
+upstream arguments or output. The delegated process inherits terminal streams,
+signals, and exit status; only its copied environment has `XDG_STATE_HOME`
+removed so lock metadata resolves through the active managed alias.
+
+All `skillset` management, inspection, diagnostic, and delegated operations first
+take a stable, non-creating advisory lock on the existing HOME directory. Routine
+operations then take `~/.agents/.skillset.lock`, always in that order, and retain
+its existing on-disk compatibility. Routine inspection validates the complete
+managed layout and remains read-only; `doctor` aggregates invalid and partial
+state and acquires the managed lock only when it is a safe regular file.
+Delegation preserves both locks for the complete `npx skills` process lifetime,
+so wrapper operations safely wait for one another. After initialization, always
+prefer `skillset skills ...` for global installation and maintenance. Direct
+`npx skills` commands cannot honor these locks and must not run concurrently with
+any `skillset` operation.
 
 ## Inspect skillsets
 
@@ -226,6 +226,48 @@ controls, invisible format controls, and line/paragraph separators are rendered
 as deterministic `\xNN`, `\uNNNN`, or `\UNNNNNNNN` escapes. Wrapper-created
 table delimiters and line endings remain unchanged.
 
+## Rename skillsets
+
+Rename an inactive set without changing the active aliases:
+
+```sh
+skillset rename experiment trial
+```
+
+The active set can be renamed with the same command:
+
+```sh
+skillset rename default baseline
+```
+
+An active rename moves the complete set first and then atomically retargets
+`~/.agents/active`; the stable root aliases remain unchanged. Rename refuses
+any existing destination, including files and symlinks, without overwriting it.
+If active retargeting fails before it commits, the directory rename is rolled
+back. If rollback cannot restore a valid layout, the error names the old, new,
+and active paths and identifies the remaining data location. Preserve that copy
+and inspect the reported state before either moving the set back or retargeting
+`active`; then run `skillset doctor`.
+
+## Remove skillsets
+
+Remove an inactive set with an interactive confirmation:
+
+```text
+$ skillset remove trial
+Remove skillset 'trial'? [y/N] yes
+```
+
+Only `y` or `yes`, ignoring case and surrounding whitespace, confirms removal.
+Use `--yes` for noninteractive operation:
+
+```sh
+skillset remove trial --yes
+```
+
+The active set is always refused, even with `--yes`. Activate another set with
+`skillset use` before removing it.
+
 ## Diagnose the managed layout
 
 Run the read-only diagnostic command after initialization, when another command
@@ -257,48 +299,6 @@ otherwise ignored. Finding text uses the same visible escaping for controls and
 line separators, so each finding remains one physical line. Errors are printed
 before warnings. Any error produces exit status 1; warnings alone and a healthy
 layout produce status 0. A healthy run may print nothing.
-
-## Install and maintain skills
-
-After activating the intended set, run upstream commands through the wrapper:
-
-```sh
-skillset skills add SOURCE
-skillset skills list
-skillset skills remove SKILL
-skillset skills update
-```
-
-For `add`, `list`/`ls`, `remove`/`rm`, and `update`, the wrapper injects
-`--global` unless exact `-g` or `--global` is already present before an option
-terminator. It inserts the flag before `--`, or appends it when no terminator is
-present. Exact `-p` and `--project` options are rejected for those commands
-because managed skillsets contain global state; tokens after `--` remain
-literals. Scope-free `find`, `use`, and upstream `init` commands, as well as an
-invocation with no upstream arguments, pass through unchanged:
-
-```sh
-skillset skills find formatter
-skillset skills use SKILL
-```
-
-Unknown upstream commands also pass through unchanged, but the wrapper warns
-on stderr that global scope was not injected. It does not reinterpret other
-upstream arguments or output. The delegated process inherits terminal streams,
-signals, and exit status; only its copied environment has `XDG_STATE_HOME`
-removed so lock metadata resolves through the active managed alias.
-
-All `skillset` management, inspection, diagnostic, and delegated operations first
-take a stable, non-creating advisory lock on the existing HOME directory. Routine
-operations then take `~/.agents/.skillset.lock`, always in that order, and retain
-its existing on-disk compatibility. Routine inspection validates the complete
-managed layout and remains read-only; `doctor` aggregates invalid and partial
-state and acquires the managed lock only when it is a safe regular file.
-Delegation preserves both locks for the complete `npx skills` process lifetime,
-so wrapper operations safely wait for one another. After initialization, always
-prefer `skillset skills ...` for global installation and maintenance. Direct
-`npx skills` commands cannot honor these locks and must not run concurrently with
-any `skillset` operation.
 
 ## Recovery
 
