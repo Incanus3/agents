@@ -8,10 +8,16 @@ commands plus managed delegation to the upstream `skills` CLI.
 ## Requirements and PATH
 
 The CLI requires Linux and Python 3 and uses only the Python standard library.
-Add its directory to your shell startup file, then start a new shell:
+Add its directory to your shell startup file using the syntax for your shell, then start a new shell:
 
 ```sh
+# Bash and Zsh
 export PATH="$HOME/.agents/bin:$PATH"
+```
+
+```fish
+# Fish
+fish_add_path "$HOME/.agents/bin"
 ```
 
 ## Shell completions
