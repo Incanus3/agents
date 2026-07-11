@@ -14,6 +14,28 @@ Add its directory to your shell startup file, then start a new shell:
 export PATH="$HOME/.agents/bin:$PATH"
 ```
 
+## Shell completions
+
+Load completions for the current shell session:
+
+```sh
+# Bash
+source <(skillset completions bash)
+
+# Zsh
+source <(skillset completions zsh)
+
+# Fish
+skillset completions fish | source
+```
+
+For persistent completion, redirect the generated script to a file in your shell's normal completion directory and
+restart the shell. The destination depends on the shell and distribution.
+
+Script generation does not require an initialized or healthy managed layout. Command and option completion is always
+available after loading the script; existing skillset-name completion calls `skillset list` and therefore requires a
+healthy managed layout at completion time. Arguments following `skillset skills` are left to the upstream CLI.
+
 ## Initialize the current installation
 
 Choose a lowercase name for the current global collection:
