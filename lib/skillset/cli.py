@@ -4,6 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from .completions import emit_completions
 from .delegate import delegate_skills
 from .doctor import doctor
 from .errors import OperationalError
@@ -58,6 +59,10 @@ def parser():
     show_parser = commands.add_parser("show", help="show skills in a skillset")
     show_parser.add_argument("name", nargs="?")
     commands.add_parser("doctor", help="diagnose the managed layout")
+    completions_parser = commands.add_parser(
+        "completions", help="emit a shell completion script"
+    )
+    completions_parser.add_argument("shell", choices=("bash", "zsh", "fish"))
     skills_parser = commands.add_parser(
         "skills", help="run managed upstream skills", add_help=False
     )
@@ -68,6 +73,9 @@ def parser():
 def main():
     command_parser = parser()
     arguments = command_parser.parse_args()
+    if arguments.command == "completions":
+        emit_completions(arguments.shell)
+        return 0
     root = Path.home() / ".agents"
     inspection = arguments.command in {"list", "current", "show"}
     status = 0

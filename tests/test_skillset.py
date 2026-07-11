@@ -384,8 +384,58 @@ class SkillsetTests(unittest.TestCase):
                 "current",
                 "show",
                 "doctor",
+                "completions",
             },
         )
+
+    def test_completions_emit_deterministic_scripts_without_managed_state(self):
+        before = self.filesystem_snapshot(self.home)
+        for shell in ("bash", "zsh", "fish"):
+            with self.subTest(shell=shell):
+                first = self.run_cli("completions", shell)
+                second = self.run_cli("completions", shell)
+                self.assertEqual(first.returncode, 0, first.stderr)
+                self.assertEqual(first.stderr, "")
+                self.assertEqual(first.stdout, second.stdout)
+                self.assertTrue(first.stdout.strip())
+                self.assertTrue(first.stdout.endswith("\n"))
+                self.assertFalse(first.stdout.endswith("\n\n"))
+                self.assertIn("skillset", first.stdout)
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_completions_bypass_malformed_managed_state_without_mutation(self):
+        self.root.mkdir()
+        (self.root / "active").write_text(
+            "not a managed symlink", encoding="utf-8"
+        )
+        before = self.filesystem_snapshot(self.home)
+
+        result = self.run_cli("completions", "bash")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertIn("complete", result.stdout)
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_generated_completion_scripts_pass_available_shell_syntax_checks(self):
+        checked = []
+        for shell in ("bash", "zsh", "fish"):
+            executable = shutil.which(shell)
+            if executable is None:
+                continue
+            with self.subTest(shell=shell):
+                generated = self.run_cli("completions", shell)
+                checked.append(shell)
+                self.assertEqual(generated.returncode, 0, generated.stderr)
+                parsed = subprocess.run(
+                    [executable, "-n"],
+                    input=generated.stdout,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(parsed.returncode, 0, parsed.stderr)
+        self.assertIn("bash", checked)
 
     def test_doctor_accepts_healthy_state_without_mutation_or_findings(self):
         self.initialize()
@@ -2145,6 +2195,9 @@ class SkillsetTests(unittest.TestCase):
             ("current", "--verbose"),
             ("show", "default", "extra"),
             ("doctor", "extra"),
+            ("completions",),
+            ("completions", "powershell"),
+            ("completions", "bash", "extra"),
             ("unknown-command",),
         ]
         for arguments in cases:
