@@ -6,21 +6,25 @@ import sys
 COMMANDS = "init create use rename remove list current show doctor skills completions"
 
 BASH = rf"""_skillset_names() {{
-    local line
+    local output line
+    output="$(command skillset list 2>/dev/null)" || return 0
     while IFS= read -r line; do
         printf '%s\n' "${{line#\* }}"
-    done < <(command skillset list 2>/dev/null)
+    done <<< "$output"
 }}
 
 _skillset_positional_count() {{
     local index token skip=0 after_options=0 count=0
     for ((index = 2; index < COMP_CWORD; index++)); do
         token="${{COMP_WORDS[index]}}"
-        if (( skip )); then skip=0; continue; fi
+        if (( skip )); then ((skip--)); continue; fi
         if (( after_options )); then ((count++)); continue; fi
         case "$token" in
             --) after_options=1 ;;
-            -f|--from) skip=1 ;;
+            -f) skip=1 ;;
+            --from)
+                if [[ "${{COMP_WORDS[index+1]}}" == = ]]; then skip=2; else skip=1; fi
+                ;;
             --from=*) ;;
             -h|--help|--use|--yes|-v|--verbose) ;;
             -*) ;;
@@ -39,7 +43,7 @@ _skillset_after_option_terminator() {{
 }}
 
 _skillset_completion() {{
-    local current="${{COMP_WORDS[COMP_CWORD]}}"
+    local current="${{2-${{COMP_WORDS[COMP_CWORD]}}}}"
     local previous="${{COMP_WORDS[COMP_CWORD-1]}}"
     local subcommand position candidates value after_terminator=0
     COMPREPLY=()
@@ -53,6 +57,11 @@ _skillset_completion() {{
     case "$subcommand" in
         create)
             if (( ! after_terminator )) && [[ "$previous" == -f || "$previous" == --from ]]; then
+                COMPREPLY=( $(compgen -W "$(_skillset_names)" -- "$current") )
+                return
+            fi
+            if (( ! after_terminator && COMP_CWORD >= 2 )) &&
+                    [[ "$previous" == = && "${{COMP_WORDS[COMP_CWORD-2]}}" == --from ]]; then
                 COMPREPLY=( $(compgen -W "$(_skillset_names)" -- "$current") )
                 return
             fi
@@ -103,16 +112,18 @@ if (( ! $+functions[compdef] )); then
 fi
 
 _skillset_names() {
-    local line
+    local output line
+    output="$(command skillset list 2>/dev/null)" || return 0
     while IFS= read -r line; do
         print -r -- "${line#\* }"
-    done < <(command skillset list 2>/dev/null)
+    done <<< "$output"
 }
 
 _skillset() {
     local context state state_descr line
     typeset -A opt_args
     _arguments -S -C \
+        -A "-*" \
         '(-h --help)'{-h,--help}'[show help]' \
         '1:command:->command' \
         '*::argument:->arguments' && return 0
@@ -138,41 +149,41 @@ _skillset() {
         arguments)
             case "${words[1]}" in
                 init)
-                    _arguments -S '(-h --help)'{-h,--help}'[show help]' '1:name:'
+                    _arguments -S '(-h --help)'{-h,--help}'[show help]' '1:name:' && return 0
                     ;;
                 create)
                     _arguments -S \
                         '(-h --help)'{-h,--help}'[show help]' \
                         '(-f --from)'{-f,--from=}'[clone from an existing skillset]:source skillset:->skillsets' \
                         '--use[activate the created skillset]' \
-                        '1:name:'
+                        '1:name:' && return 0
                     ;;
                 use)
-                    _arguments -S '(-h --help)'{-h,--help}'[show help]' '1:name:->skillsets'
+                    _arguments -S '(-h --help)'{-h,--help}'[show help]' '1:name:->skillsets' && return 0
                     ;;
                 rename)
                     _arguments -S \
                         '(-h --help)'{-h,--help}'[show help]' \
-                        '1:old name:->skillsets' '2:new name:'
+                        '1:old name:->skillsets' '2:new name:' && return 0
                     ;;
                 remove)
                     _arguments -S \
                         '(-h --help)'{-h,--help}'[show help]' \
-                        '--yes[skip confirmation]' '1:name:->skillsets'
+                        '--yes[skip confirmation]' '1:name:->skillsets' && return 0
                     ;;
                 list)
                     _arguments -S \
                         '(-h --help)'{-h,--help}'[show help]' \
-                        '(-v --verbose)'{-v,--verbose}'[show skill inventory]'
+                        '(-v --verbose)'{-v,--verbose}'[show skill inventory]' && return 0
                     ;;
                 current|doctor)
-                    _arguments -S '(-h --help)'{-h,--help}'[show help]'
+                    _arguments -S '(-h --help)'{-h,--help}'[show help]' && return 0
                     ;;
                 show)
-                    _arguments -S '(-h --help)'{-h,--help}'[show help]' '1::name:->skillsets'
+                    _arguments -S '(-h --help)'{-h,--help}'[show help]' '1::name:->skillsets' && return 0
                     ;;
                 completions)
-                    _arguments -S '(-h --help)'{-h,--help}'[show help]' '1:shell:(bash zsh fish)'
+                    _arguments -S '(-h --help)'{-h,--help}'[show help]' '1:shell:(bash zsh fish)' && return 0
                     ;;
                 skills) return 0 ;;
             esac
@@ -184,25 +195,34 @@ _skillset() {
             ;;
     esac
 }
-compdef _skillset skillset
+
+if [[ "${zsh_eval_context[-1]}" == loadautofunc ]]; then
+    _skillset "$@"
+else
+    compdef _skillset skillset
+fi
 """
 
 FISH = """function __skillset_names
-    command skillset list 2>/dev/null | string replace -r '^\\* ' ''
+    set -l output (command skillset list 2>/dev/null)
+    set -l list_status $status
+    test $list_status -eq 0; or return 0
+    test (count $output) -gt 0; or return 0
+    string replace -r '^\\* ' '' $output
 end
 
 function __skillset_needs_command
-    set -l tokens (commandline -opc)
+    set -l tokens (commandline -xpc)
     test (count $tokens) -eq 1
 end
 
 function __skillset_using_command
-    set -l tokens (commandline -opc)
+    set -l tokens (commandline -xpc)
     test (count $tokens) -ge 2; and test $tokens[2] = $argv[1]
 end
 
 function __skillset_positional_count
-    set -l tokens (commandline -opc)
+    set -l tokens (commandline -xpc)
     set -e tokens[1..2]
     set -l count 0
     set -l skip false

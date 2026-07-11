@@ -30,7 +30,8 @@ skillset completions fish | source
 ```
 
 For persistent completion, redirect the generated script to a file in your shell's normal completion directory and
-restart the shell. The destination depends on the shell and distribution.
+restart the shell. The destination depends on the shell and distribution. For Zsh, use an underscore-prefixed filename
+such as `_skillset` in a directory on `fpath`; `compinit` will discover and autoload it.
 
 Script generation does not require an initialized or healthy managed layout. Command and option completion is always
 available after loading the script; existing skillset-name completion calls `skillset list` and therefore requires a

@@ -20,7 +20,23 @@ delegated through `skillset skills` remain opaque.
 No new runtime dependency is required. Final implementation review consulted the official Zsh 5.9.1 completion-system
 documentation at <https://zsh.sourceforge.io/Doc/Release/Completion-System.html>. It confirms that a `*::` action
 rewrites `words` and `CURRENT` to normal arguments, `_arguments -S` treats `--` as an option terminator, and a
-`--from=` option specification accepts both separated and equals-sign arguments.
+`--from=` option specification accepts both separated and equals-sign arguments. It also specifies `-A "-*"` for
+stopping option completion after the first normal argument and requires a zero return when matches were added. The
+official autoload documentation at
+<https://zsh.sourceforge.io/Doc/Release/Functions.html> establishes that a multi-statement completion file is executed
+on its first autoload call. The generated script therefore detects a final `loadautofunc` evaluation context and invokes
+its implementation immediately; direct sourcing instead registers that implementation with `compdef`.
+
+The GNU Bash programmable-completion documentation at
+<https://www.gnu.org/software/bash/manual/html_node/Programmable-Completion.html> defines `COMP_WORDS`, `COMP_CWORD`,
+and `COMP_WORDBREAKS`. A final-review interactive PTY probe with the host's default word breaks observed
+`skillset create --from=d` as `skillset`, `create`, `--from`, `=`, `d`, with `COMP_CWORD=4`. Bash completion handles
+both that real Readline shape and the unsplit shape used by direct completion-function callers. At
+`skillset create --from=<TAB>`, the array ends in `=`, while the completion function's second argument is the required
+empty current word; the implementation prefers that argument when Bash supplies it.
+
+The current Fish `commandline` documentation at <https://fishshell.com/docs/current/cmds/commandline.html> deprecates
+raw tokenization through `-o` and identifies `commandline -xpc` as the completion-oriented form for completed tokens.
 
 ## Public command contract
 
@@ -48,8 +64,9 @@ repairs, or mutates managed state.
 The generated scripts query state only while interactively completing an argument that accepts an existing skillset.
 They invoke the `skillset` found through `PATH`, run `skillset list` with stderr suppressed, remove an optional leading
 `* ` active marker, and pass the resulting names to native shell completion APIs. A failed lookup produces no dynamic
-candidates. Because lookup uses the public command, it retains normal validation and locking and may wait briefly behind
-an active operation.
+candidates, even if the failed process wrote plausible partial stdout: each helper buffers the complete output and checks
+the exit status before parsing any line. Because lookup uses the public command, it retains normal validation and locking
+and may wait briefly behind an active operation.
 
 ## Completion grammar
 
@@ -85,9 +102,12 @@ entering `stable_home_lock`. Existing command dispatch and lock semantics remain
 
 The shell templates independently encode the approved public grammar using native facilities:
 
-- Bash registers a completion function with `complete` and writes candidates to `COMPREPLY`.
-- Zsh defines an underscore-prefixed completion function and registers it with `compdef`.
-- Fish declares context-sensitive candidates with `complete` and helper functions.
+- Bash registers a completion function with `complete`, reads Bash's explicit current-word argument, normalizes the split
+  `--from`, `=`, `VALUE` shape, and writes candidates to `COMPREPLY`.
+- Zsh defines an implementation function. Direct sourcing registers it with `compdef`; `fpath` autoloading invokes it on
+  the first call when `zsh_eval_context` ends in `loadautofunc`. Its outer parser stops wrapper options after the
+  subcommand, and nested parsers return immediately after successfully adding matches.
+- Fish declares context-sensitive candidates with `complete` and tokenizes completed arguments with `commandline -xpc`.
 
 Dynamic lines are treated as candidate data, not evaluated as shell code. Managed names already use the restricted
 lowercase name grammar, and `skillset list` validates and sanitizes its output before a script consumes it.
@@ -103,8 +123,9 @@ Fish: skillset completions fish | source
 ```
 
 Also explain that users may redirect the generated script into their shell's normal completion directory for persistent
-installation. Do not prescribe one global destination because conventions vary by shell and distribution. State that
-dynamic skillset-name completion requires a healthy managed layout, while script generation does not.
+installation. Do not prescribe one global destination because conventions vary by shell and distribution. Clarify that
+Zsh `fpath` installation requires an underscore-prefixed filename such as `_skillset`. State that dynamic skillset-name
+completion requires a healthy managed layout, while script generation does not.
 
 ## Verification strategy
 
@@ -117,12 +138,15 @@ Update `tests/test_skillset.py` to establish:
 4. Generation succeeds with deliberately malformed managed state and does not alter it.
 5. Missing, unsupported, and extra shell arguments exit 2.
 6. Every script represents all public subcommands, relevant options, supported shell names, dynamic-name lookup, stderr
-   suppression, and opaque delegated arguments.
+   suppression, failed-lookup stdout rejection, and opaque delegated arguments.
 7. Generated output passes `bash -n`, `zsh -n`, or `fish -n` when that executable is installed. An unavailable Zsh
    executable is reported as an explicit skipped test. Static Zsh contracts lock rewritten-word dispatch, `--from=`
-   support, option-terminator parsing, and opaque delegation when runtime Zsh behavior cannot be exercised.
-8. Bash behavior is tested in a subprocess by sourcing the output, setting completion context, and asserting static and
-   dynamic candidates. Add equivalent noninteractive Fish and Zsh behavior tests where their native APIs are reliable.
+   support, option-terminator parsing, post-subcommand option stopping, nested success propagation, opaque delegation,
+   and the dual source/autoload bootstrap.
+8. Bash behavior is tested in a subprocess with unsplit arguments, the real default Readline split around `=`, and the
+   empty current-word argument supplied for `--from=<TAB>`.
+   Fish uses its noninteractive completion API. When Zsh is installed, a temporary `_skillset` file is discovered by
+   `compinit` and its first autoload call must execute the completion implementation.
 9. Existing lock, read-only inspection, delegation, help, workflow, and usage-error tests continue to pass.
 
 Write focused failing tests before production code. Run focused completion tests while iterating, then run:

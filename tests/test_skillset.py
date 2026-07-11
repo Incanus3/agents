@@ -455,7 +455,15 @@ class SkillsetTests(unittest.TestCase):
         self.assertEqual(script.count("_arguments"), 10)
         self.assertEqual(script.count("_arguments -S"), 10)
         self.assertEqual(script.count("_arguments -S -C"), 1)
+        self.assertIn('-A "-*"', outer_parser)
+        self.assertEqual(nested_parsers.count("&& return 0"), 9)
         self.assertIn("skills) return 0 ;;", script)
+        self.assertIn(
+            'if [[ "${zsh_eval_context[-1]}" == loadautofunc ]]; then',
+            script,
+        )
+        self.assertIn('_skillset "$@"', script)
+        self.assertIn("else\n    compdef _skillset skillset\nfi", script)
 
     def test_bash_completion_is_contextual_and_uses_managed_names(self):
         bash = shutil.which("bash")
@@ -475,6 +483,10 @@ COMP_WORDS=(skillset use d); COMP_CWORD=2; _skillset_completion
 printf 'use:%s\n' "${COMPREPLY[*]}"
 COMP_WORDS=(skillset create --from=d); COMP_CWORD=2; _skillset_completion
 printf 'from:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(skillset create --from = d); COMP_CWORD=4; _skillset_completion
+printf 'from-split:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(skillset create --from =); COMP_CWORD=3; _skillset_completion skillset '' --from
+printf 'from-empty:%s\n' "${COMPREPLY[*]}"
 COMP_WORDS=(skillset create --from d); COMP_CWORD=3; _skillset_completion
 printf 'from-separated:%s\n' "${COMPREPLY[*]}"
 COMP_WORDS=(skillset rename default n); COMP_CWORD=3; _skillset_completion
@@ -496,6 +508,7 @@ printf 'skills:%s\n' "${#COMPREPLY[@]}"'''
             [
                 "top:show", "use:default demo",
                 "from:--from=default --from=demo",
+                "from-split:default demo", "from-empty:default demo",
                 "from-separated:default demo", "new:0",
                 "terminator:0", "skills:0",
             ],
@@ -528,8 +541,66 @@ printf 'skills:%s\n' "${#COMPREPLY[@]}"'''
         self.assertIn("show", candidates("skillset sh"))
         self.assertEqual(candidates("skillset use d"), ["default", "demo"])
         self.assertEqual(candidates("skillset create --from d"), ["default", "demo"])
+        self.assertIn("commandline -xpc", generated.stdout)
+        self.assertNotIn("commandline -opc", generated.stdout)
         self.assertEqual(candidates("skillset rename default n"), [])
         self.assertEqual(candidates("skillset skills l"), [])
+
+    def test_completion_name_lookup_discards_stdout_on_failure(self):
+        stub_directory = self.sandbox / "failed-list-bin"
+        stub_directory.mkdir()
+        stub = stub_directory / "skillset"
+        stub.write_text(
+            "#!/bin/sh\nprintf '%s\\n' phantom\nexit 1\n", encoding="utf-8"
+        )
+        stub.chmod(0o755)
+        environment = self.environment(extra={
+            "PATH": f"{stub_directory}:{os.environ.get('PATH', '')}"
+        })
+
+        bash = shutil.which("bash")
+        self.assertIsNotNone(bash)
+        bash_script = self.sandbox / "failed-list.bash"
+        bash_script.write_text(
+            self.run_cli("completions", "bash").stdout, encoding="utf-8"
+        )
+        bash_probe = r'''source "$1"
+COMP_WORDS=(skillset use p); COMP_CWORD=2; _skillset_completion
+printf '%s\n' "${#COMPREPLY[@]}"'''
+        bash_result = subprocess.run(
+            [bash, "-c", bash_probe, "bash", str(bash_script)],
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(bash_result.returncode, 0, bash_result.stderr)
+        self.assertEqual(bash_result.stdout, "0\n")
+
+        zsh_script = self.run_cli("completions", "zsh").stdout
+        self.assertIn(
+            'output="$(command skillset list 2>/dev/null)" || return 0',
+            zsh_script,
+        )
+
+        fish = shutil.which("fish")
+        if fish is not None:
+            fish_script = self.sandbox / "failed-list.fish"
+            fish_script.write_text(
+                self.run_cli("completions", "fish").stdout, encoding="utf-8"
+            )
+            fish_result = subprocess.run(
+                [
+                    fish, "-c", "source $argv[1]; complete -C 'skillset use p'",
+                    str(fish_script),
+                ],
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(fish_result.returncode, 0, fish_result.stderr)
+            self.assertEqual(fish_result.stdout, "")
 
     def test_generated_completion_scripts_pass_available_shell_syntax_checks(self):
         checked = []
@@ -568,6 +639,32 @@ printf 'skills:%s\n' "${#COMPREPLY[@]}"'''
             check=False,
         )
         self.assertEqual(parsed.returncode, 0, parsed.stderr)
+
+    def test_generated_zsh_completion_runs_on_first_autoload_call(self):
+        zsh = shutil.which("zsh")
+        if zsh is None:
+            self.skipTest("zsh is not installed")
+        generated = self.run_cli("completions", "zsh")
+        completion_directory = self.sandbox / "zsh-completions"
+        completion_directory.mkdir()
+        (completion_directory / "_skillset").write_text(
+            generated.stdout, encoding="utf-8"
+        )
+        probe = r'''fpath=("$1" $fpath)
+autoload -Uz compinit
+compinit -D
+_arguments() { print -r -- first-autoload-call; return 0; }
+_skillset'''
+
+        result = subprocess.run(
+            [zsh, "-f", "-c", probe, "zsh", str(completion_directory)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "first-autoload-call\n")
 
     def test_doctor_accepts_healthy_state_without_mutation_or_findings(self):
         self.initialize()
