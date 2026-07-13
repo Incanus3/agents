@@ -88,17 +88,7 @@ def canonical_alias(path, target):
         return False
 
 
-def validate_layout(root):
-    skillsets = root / "skillsets"
-    if not real_kind(skillsets, stat.S_ISDIR):
-        raise OperationalError("skillsets are not initialized")
-    use_staging = root / ".skillset-use.staging"
-    if lexists(use_staging):
-        raise OperationalError(
-            f"stale active staging path must be recovered: {use_staging}"
-        )
-    require_alias(root / "skills", "active/skills")
-    require_alias(root / ".skill-lock.json", "active/.skill-lock.json")
+def validate_active_set(root):
     active = root / "active"
     if not active.is_symlink():
         raise OperationalError(f"managed alias is missing or invalid: {active}")
@@ -110,6 +100,21 @@ def validate_layout(root):
     if target != f"skillsets/{active_name}":
         raise OperationalError(f"active alias has a noncanonical target: {target}")
     validate_set(root, active_name)
+    return active_name
+
+
+def validate_layout(root):
+    skillsets = root / "skillsets"
+    if not real_kind(skillsets, stat.S_ISDIR):
+        raise OperationalError("skillsets are not initialized")
+    use_staging = root / ".skillset-use.staging"
+    if lexists(use_staging):
+        raise OperationalError(
+            f"stale active staging path must be recovered: {use_staging}"
+        )
+    require_alias(root / "skills", "active/skills")
+    require_alias(root / ".skill-lock.json", "active/.skill-lock.json")
+    active_name = validate_active_set(root)
     for entry in skillsets.iterdir():
         if entry.name.startswith(".skillset-create-") and entry.name.endswith(
             ".staging"
@@ -164,28 +169,31 @@ def operation_lock(root, create=True):
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
-@contextmanager
-def doctor_operation_lock(root, errors):
-    lock_path = root / ".skillset.lock"
+def inspect_advisory_lock_entry(lock_path, errors):
     try:
         metadata = lock_path.lstat()
     except FileNotFoundError:
         errors.append(f"advisory lock is missing: {lock_path}")
-        yield None
-        return
+        return None
     except OSError as error:
         errors.append(f"could not inspect advisory lock {lock_path}: {error}")
-        yield None
-        return
+        return None
     if stat.S_ISLNK(metadata.st_mode):
         errors.append(f"advisory lock symlink is not allowed: {lock_path}")
-        yield None
-        return
+        return None
     if not stat.S_ISREG(metadata.st_mode):
         errors.append(f"advisory lock must be a real regular file: {lock_path}")
+        return None
+    return metadata
+
+
+@contextmanager
+def doctor_operation_lock(root, errors):
+    lock_path = root / ".skillset.lock"
+    metadata = inspect_advisory_lock_entry(lock_path, errors)
+    if metadata is None:
         yield None
         return
-
     try:
         descriptor = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as error:

@@ -35,7 +35,7 @@ def preflight_init(root, name):
     return lexists(skills), lexists(lockfile)
 
 
-def rollback_init(root, target, had_skills, had_lock, aliases):
+def cleanup_init_aliases(aliases):
     problems = []
     for alias, expected_target in reversed(aliases):
         try:
@@ -45,7 +45,11 @@ def rollback_init(root, target, had_skills, had_lock, aliases):
                 raise OSError(f"unexpected entry blocks rollback at {alias}")
         except Exception as error:
             problems.append(f"could not remove {alias}: {error}")
+    return problems
 
+
+def restore_init_contents(root, target, had_skills, had_lock):
+    problems = []
     pairs = (
         (had_skills, target / "skills", root / "skills", "directory"),
         (had_lock, target / ".skill-lock.json", root / ".skill-lock.json", "file"),
@@ -66,6 +70,12 @@ def rollback_init(root, target, had_skills, had_lock, aliases):
                     staged.unlink()
         except Exception as error:
             problems.append(f"could not restore {original}: {error}")
+    return problems
+
+
+def rollback_init(root, target, had_skills, had_lock, aliases):
+    problems = cleanup_init_aliases(aliases)
+    problems.extend(restore_init_contents(root, target, had_skills, had_lock))
 
     for directory in (target, root / "skillsets"):
         try:
@@ -76,25 +86,28 @@ def rollback_init(root, target, had_skills, had_lock, aliases):
     return problems
 
 
+def materialize_initial_set(root, target, had_skills, had_lock):
+    target.parent.mkdir()
+    target.mkdir()
+    if had_skills:
+        shutil.move(os.fspath(root / "skills"), os.fspath(target / "skills"))
+    else:
+        (target / "skills").mkdir()
+    if had_lock:
+        shutil.move(
+            os.fspath(root / ".skill-lock.json"),
+            os.fspath(target / ".skill-lock.json"),
+        )
+    else:
+        write_empty_lock(target / ".skill-lock.json")
+
+
 def init(root, name):
     had_skills, had_lock = preflight_init(root, name)
-    skillsets = root / "skillsets"
     target = set_path(root, name)
     aliases = []
     try:
-        skillsets.mkdir()
-        target.mkdir()
-        if had_skills:
-            shutil.move(os.fspath(root / "skills"), os.fspath(target / "skills"))
-        else:
-            (target / "skills").mkdir()
-        if had_lock:
-            shutil.move(
-                os.fspath(root / ".skill-lock.json"),
-                os.fspath(target / ".skill-lock.json"),
-            )
-        else:
-            write_empty_lock(target / ".skill-lock.json")
+        materialize_initial_set(root, target, had_skills, had_lock)
         for path, link_target in (
             (root / "active", f"skillsets/{name}"),
             (root / "skills", "active/skills"),
@@ -118,6 +131,20 @@ def init(root, name):
         raise OperationalError(f"initialization failed and was rolled back: {error}") from error
 
 
+def populate_staged_set(staging, source_path):
+    if source_path is None:
+        (staging / "skills").mkdir()
+        write_empty_lock(staging / ".skill-lock.json")
+        return
+    shutil.copytree(
+        source_path / "skills",
+        staging / "skills",
+        symlinks=True,
+        copy_function=shutil.copy2,
+    )
+    shutil.copy2(source_path / ".skill-lock.json", staging / ".skill-lock.json")
+
+
 def create(root, name, source):
     validate_name(name)
     if source is not None:
@@ -132,19 +159,7 @@ def create(root, name, source):
     source_path = validate_set(root, source) if source is not None else None
     try:
         staging.mkdir()
-        if source_path is None:
-            (staging / "skills").mkdir()
-            write_empty_lock(staging / ".skill-lock.json")
-        else:
-            shutil.copytree(
-                source_path / "skills",
-                staging / "skills",
-                symlinks=True,
-                copy_function=shutil.copy2,
-            )
-            shutil.copy2(
-                source_path / ".skill-lock.json", staging / ".skill-lock.json"
-            )
+        populate_staged_set(staging, source_path)
         if lexists(destination):
             raise OperationalError(f"skillset appeared during creation: {destination}")
         os.rename(staging, destination)
@@ -197,6 +212,34 @@ def set_is_valid(root, name):
     return True
 
 
+def active_rename_committed(root, new_name, active, new_target):
+    return canonical_alias(active, new_target) and set_is_valid(root, new_name)
+
+
+def rollback_active_rename_directory(
+    root, old_name, new_name, old, new, active, old_target, staging
+):
+    if not canonical_alias(active, old_target):
+        return False, [f"active alias is not canonical for {old} or {new}: {active}"]
+
+    problems = []
+    if not lexists(old) and set_is_valid(root, new_name):
+        try:
+            os.rename(new, old)
+        except (Exception, KeyboardInterrupt) as rollback_error:
+            problems.append(f"could not roll back {new} to {old}: {rollback_error}")
+    elif not (set_is_valid(root, old_name) and not lexists(new)):
+        problems.append(f"could not safely roll back {new} to {old}")
+
+    rolled_back = (
+        canonical_alias(active, old_target)
+        and set_is_valid(root, old_name)
+        and not lexists(new)
+        and not lexists(staging)
+    )
+    return rolled_back, problems
+
+
 def incomplete_active_rename(error, old, new, active, problems):
     details = "; ".join(problems)
     remaining = [str(path) for path in (old, new) if lexists(path)]
@@ -218,7 +261,7 @@ def recover_active_rename(root, old_name, new_name, error):
     new_target = f"skillsets/{new_name}"
     cleanup_problem = cleanup_rename_staging(staging, new_target)
 
-    if canonical_alias(active, new_target) and set_is_valid(root, new_name):
+    if active_rename_committed(root, new_name, active, new_target):
         if cleanup_problem is not None:
             incomplete_active_rename(
                 error, old, new, active, [cleanup_problem]
@@ -227,57 +270,34 @@ def recover_active_rename(root, old_name, new_name, error):
             raise error
         return
 
-    problems = []
+    rolled_back, problems = rollback_active_rename_directory(
+        root, old_name, new_name, old, new, active, old_target, staging
+    )
     if cleanup_problem is not None:
-        problems.append(cleanup_problem)
-    if canonical_alias(active, old_target):
-        if not lexists(old) and set_is_valid(root, new_name):
-            try:
-                os.rename(new, old)
-            except (Exception, KeyboardInterrupt) as rollback_error:
-                problems.append(f"could not roll back {new} to {old}: {rollback_error}")
-        elif not (set_is_valid(root, old_name) and not lexists(new)):
-            problems.append(f"could not safely roll back {new} to {old}")
-
-        rolled_back = (
-            canonical_alias(active, old_target)
-            and set_is_valid(root, old_name)
-            and not lexists(new)
-            and not lexists(staging)
-        )
-        if rolled_back:
-            if isinstance(error, KeyboardInterrupt):
-                raise error
-            raise OperationalError(
-                f"could not rename active skillset {old_name!r} to {new_name!r}; "
-                f"the directory rename was rolled back: {error}"
-            ) from error
-    else:
-        problems.append(f"active alias is not canonical for {old} or {new}: {active}")
+        problems.insert(0, cleanup_problem)
+    if rolled_back:
+        if isinstance(error, KeyboardInterrupt):
+            raise error
+        raise OperationalError(
+            f"could not rename active skillset {old_name!r} to {new_name!r}; "
+            f"the directory rename was rolled back: {error}"
+        ) from error
 
     if not problems:
         problems.append("rollback did not restore the original layout")
     incomplete_active_rename(error, old, new, active, problems)
 
 
-def rename(root, old_name, new_name):
-    validate_name(old_name)
-    validate_name(new_name)
-    active_name = validate_layout(root)
-    old = validate_set(root, old_name)
-    new = set_path(root, new_name)
-    if lexists(new):
-        raise OperationalError(f"skillset already exists: {new}")
+def rename_inactive_set(old, new, old_name, new_name):
+    try:
+        os.rename(old, new)
+    except Exception as error:
+        raise OperationalError(
+            f"could not rename {old_name!r} to {new_name!r}: {error}"
+        ) from error
 
-    if old_name != active_name:
-        try:
-            os.rename(old, new)
-        except Exception as error:
-            raise OperationalError(
-                f"could not rename {old_name!r} to {new_name!r}: {error}"
-            ) from error
-        return
 
+def rename_active_set(root, old, new, old_name, new_name):
     staging = root / ".skillset-use.staging"
     if lexists(staging):
         raise OperationalError(f"stale use staging path must be recovered: {staging}")
@@ -293,6 +313,33 @@ def rename(root, old_name, new_name):
         recover_active_rename(root, old_name, new_name, error)
 
 
+def rename(root, old_name, new_name):
+    validate_name(old_name)
+    validate_name(new_name)
+    active_name = validate_layout(root)
+    old = validate_set(root, old_name)
+    new = set_path(root, new_name)
+    if lexists(new):
+        raise OperationalError(f"skillset already exists: {new}")
+
+    if old_name != active_name:
+        rename_inactive_set(old, new, old_name, new_name)
+        return
+
+    rename_active_set(root, old, new, old_name, new_name)
+
+
+def confirm_removal(name):
+    print(
+        f"Remove skillset {name!r}? [y/N] ",
+        end="",
+        file=sys.stderr,
+        flush=True,
+    )
+    if sys.stdin.readline().strip().lower() not in {"y", "yes"}:
+        raise OperationalError(f"removal of skillset {name!r} cancelled")
+
+
 def remove(root, name, confirmed):
     validate_name(name)
     active_name = validate_layout(root)
@@ -302,14 +349,7 @@ def remove(root, name, confirmed):
             f"cannot remove active skillset {name!r}; activate another set first"
         )
     if not confirmed:
-        print(
-            f"Remove skillset {name!r}? [y/N] ",
-            end="",
-            file=sys.stderr,
-            flush=True,
-        )
-        if sys.stdin.readline().strip().lower() not in {"y", "yes"}:
-            raise OperationalError(f"removal of skillset {name!r} cancelled")
+        confirm_removal(name)
     try:
         shutil.rmtree(target)
     except Exception as error:

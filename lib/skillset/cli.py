@@ -113,6 +113,14 @@ def run_managed_command(root, arguments, command_parser):
     return 0
 
 
+def format_command_error(command, error, unexpected=False):
+    if command == "doctor":
+        message = f"doctor inspection failed: {error}" if unexpected else error
+        return f"skillset: error: {printable_text(message)}"
+    prefix = "operation failed: " if unexpected else ""
+    return f"skillset: {prefix}{printable_text(error)}"
+
+
 def main():
     command_parser = parser()
     arguments = command_parser.parse_args()
@@ -123,24 +131,14 @@ def main():
     try:
         return run_managed_command(root, arguments, command_parser)
     except OperationalError as error:
-        if arguments.command == "doctor":
-            print(f"skillset: error: {printable_text(error)}", file=sys.stderr)
-        else:
-            print(f"skillset: {printable_text(error)}", file=sys.stderr)
+        print(format_command_error(arguments.command, error), file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("skillset: interrupted", file=sys.stderr)
         return 130
     except Exception as error:
-        if arguments.command == "doctor":
-            finding = f"doctor inspection failed: {error}"
-            print(
-                f"skillset: error: {printable_text(finding)}",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                f"skillset: operation failed: {printable_text(error)}",
-                file=sys.stderr,
-            )
+        print(
+            format_command_error(arguments.command, error, unexpected=True),
+            file=sys.stderr,
+        )
         return 1

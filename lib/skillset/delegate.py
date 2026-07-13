@@ -9,31 +9,35 @@ SCOPED_SKILLS_COMMANDS = {"add", "list", "ls", "remove", "rm", "update"}
 SCOPE_FREE_SKILLS_COMMANDS = {"find", "use", "init"}
 
 
+def enforce_global_scope(upstream_arguments, command_parser):
+    option_end = (
+        upstream_arguments.index("--")
+        if "--" in upstream_arguments
+        else len(upstream_arguments)
+    )
+    scope_arguments = upstream_arguments[:option_end]
+    if any(argument in ("-p", "--project") for argument in scope_arguments):
+        command_parser.error(
+            "project scope is not supported for managed skills; use global scope"
+        )
+    if not any(argument in ("-g", "--global") for argument in scope_arguments):
+        upstream_arguments.insert(option_end, "--global")
+    return upstream_arguments
+
+
 def prepare_upstream_arguments(arguments, command_parser):
     upstream_arguments = list(arguments)
-    if upstream_arguments:
-        command = upstream_arguments[0]
-        if command in SCOPED_SKILLS_COMMANDS:
-            option_end = (
-                upstream_arguments.index("--")
-                if "--" in upstream_arguments
-                else len(upstream_arguments)
-            )
-            scope_arguments = upstream_arguments[:option_end]
-            if any(argument in ("-p", "--project") for argument in scope_arguments):
-                command_parser.error(
-                    "project scope is not supported for managed skills; use global scope"
-                )
-            if not any(
-                argument in ("-g", "--global") for argument in scope_arguments
-            ):
-                upstream_arguments.insert(option_end, "--global")
-        elif command not in SCOPE_FREE_SKILLS_COMMANDS and not command.startswith("-"):
-            print(
-                "skillset: warning: unknown upstream command; global scope was not injected",
-                file=sys.stderr,
-                flush=True,
-            )
+    if not upstream_arguments:
+        return upstream_arguments
+    command = upstream_arguments[0]
+    if command in SCOPED_SKILLS_COMMANDS:
+        return enforce_global_scope(upstream_arguments, command_parser)
+    if command not in SCOPE_FREE_SKILLS_COMMANDS and not command.startswith("-"):
+        print(
+            "skillset: warning: unknown upstream command; global scope was not injected",
+            file=sys.stderr,
+            flush=True,
+        )
     return upstream_arguments
 
 

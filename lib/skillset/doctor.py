@@ -25,20 +25,26 @@ def doctor_alias(path, target, errors):
         )
 
 
-def doctor_lockfile(path, errors):
+def inspect_lockfile_entry(path, errors):
     try:
         mode = path.lstat().st_mode
     except FileNotFoundError:
         errors.append(f"lockfile is missing: {path}")
-        return None
+        return False
     except OSError as error:
         errors.append(f"could not inspect lockfile {path}: {error}")
-        return None
+        return False
     if stat.S_ISLNK(mode):
         errors.append(f"lockfile symlink is not allowed: {path}")
-        return None
+        return False
     if not stat.S_ISREG(mode):
         errors.append(f"lockfile must be a real regular file: {path}")
+        return False
+    return True
+
+
+def doctor_lockfile(path, errors):
+    if not inspect_lockfile_entry(path, errors):
         return None
     try:
         return read_lockfile(path)
@@ -50,6 +56,37 @@ def doctor_lockfile(path, errors):
         return None
 
 
+def classify_skill_entry(candidate, set_name, errors):
+    try:
+        mode = candidate.lstat().st_mode
+    except OSError as error:
+        errors.append(f"could not inspect skill {candidate}: {error}")
+        return None
+    if stat.S_ISREG(mode):
+        return None
+    if stat.S_ISLNK(mode):
+        errors.append(
+            f"skill directory symlink is not allowed in {set_name!r}: {candidate}"
+        )
+        return None
+    if not stat.S_ISDIR(mode):
+        errors.append(f"unsupported skill entry type in {set_name!r}: {candidate}")
+        return None
+    return candidate
+
+
+def inspect_skill_metadata(candidate, set_name, errors):
+    try:
+        text, reason = read_skill_text(candidate)
+        if reason is None:
+            _metadata, reason = parse_frontmatter(text)
+    except Exception as error:
+        errors.append(f"could not inspect skill metadata {candidate}: {error}")
+        return
+    if reason is not None:
+        errors.append(f"invalid skill metadata in {set_name!r}/{candidate.name}: {reason}")
+
+
 def doctor_skills(skills, set_name, errors):
     installed = set()
     try:
@@ -58,31 +95,11 @@ def doctor_skills(skills, set_name, errors):
         errors.append(f"could not inspect skills directory {skills}: {error}")
         return None
     for candidate in candidates:
-        try:
-            mode = candidate.lstat().st_mode
-        except OSError as error:
-            errors.append(f"could not inspect skill {candidate}: {error}")
+        directory = classify_skill_entry(candidate, set_name, errors)
+        if directory is None:
             continue
-        if stat.S_ISREG(mode):
-            continue
-        if stat.S_ISLNK(mode):
-            errors.append(
-                f"skill directory symlink is not allowed in {set_name!r}: {candidate}"
-            )
-            continue
-        if not stat.S_ISDIR(mode):
-            errors.append(f"unsupported skill entry type in {set_name!r}: {candidate}")
-            continue
-        installed.add(candidate.name)
-        try:
-            text, reason = read_skill_text(candidate)
-            if reason is None:
-                _metadata, reason = parse_frontmatter(text)
-        except Exception as error:
-            errors.append(f"could not inspect skill metadata {candidate}: {error}")
-            continue
-        if reason is not None:
-            errors.append(f"invalid skill metadata in {set_name!r}/{candidate.name}: {reason}")
+        installed.add(directory.name)
+        inspect_skill_metadata(directory, set_name, errors)
     return installed
 
 

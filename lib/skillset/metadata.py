@@ -46,6 +46,25 @@ def closing_double_quote(value):
     return None
 
 
+def parse_double_quoted(field, value):
+    closing = closing_double_quote(value)
+    if closing is None:
+        return None, f"unterminated double-quoted {field}"
+    trailing = value[closing + 1 :].strip()
+    if trailing and not trailing.startswith("#"):
+        return None, f"unsupported double-quoted {field}"
+    encoded = value[: closing + 1]
+    encoded = encoded.replace("\r", "\\r").replace("\n", "\\n")
+    encoded = encoded.replace("\t", "\\t")
+    try:
+        decoded = json.loads(encoded)
+    except json.JSONDecodeError:
+        return None, f"unsupported double-quoted {field}"
+    if not isinstance(decoded, str):
+        return None, f"unsupported double-quoted {field}"
+    return decoded, None
+
+
 def strip_plain_comments(value):
     lines = []
     for line in value.splitlines():
@@ -66,21 +85,9 @@ def parse_inline_scalar(field, raw):
         if reason is not None:
             return None, reason
     elif value.startswith('"'):
-        closing = closing_double_quote(value)
-        if closing is None:
-            return None, f"unterminated double-quoted {field}"
-        trailing = value[closing + 1 :].strip()
-        if trailing and not trailing.startswith("#"):
-            return None, f"unsupported double-quoted {field}"
-        encoded = value[: closing + 1]
-        encoded = encoded.replace("\r", "\\r").replace("\n", "\\n")
-        encoded = encoded.replace("\t", "\\t")
-        try:
-            value = json.loads(encoded)
-        except json.JSONDecodeError:
-            return None, f"unsupported double-quoted {field}"
-        if not isinstance(value, str):
-            return None, f"unsupported double-quoted {field}"
+        value, reason = parse_double_quoted(field, value)
+        if reason is not None:
+            return None, reason
     else:
         if value[0] in "[{&*!|>":
             return None, f"unsupported {field} scalar"
@@ -187,33 +194,32 @@ def read_skill_text(directory):
         os.close(directory_fd)
 
 
+def inspect_skill_entry(candidate):
+    try:
+        mode = candidate.lstat().st_mode
+    except OSError:
+        return candidate.name, None, None, "unsupported candidate"
+    if stat.S_ISREG(mode):
+        return None
+    if stat.S_ISLNK(mode):
+        return candidate.name, None, None, "unsupported skill directory symlink"
+    if not stat.S_ISDIR(mode):
+        return None
+    text, reason = read_skill_text(candidate)
+    metadata = None
+    if reason is None:
+        metadata, reason = parse_frontmatter(text)
+    if reason is None:
+        return candidate.name, metadata["name"], metadata["description"], None
+    return candidate.name, None, None, reason
+
+
 def inspect_skills(skills):
     inspected = []
     for candidate in sorted(skills.iterdir(), key=lambda path: path.name):
-        try:
-            mode = candidate.lstat().st_mode
-        except OSError:
-            inspected.append((candidate.name, None, None, "unsupported candidate"))
-            continue
-        if stat.S_ISREG(mode):
-            continue
-        if stat.S_ISLNK(mode):
-            inspected.append(
-                (candidate.name, None, None, "unsupported skill directory symlink")
-            )
-            continue
-        if not stat.S_ISDIR(mode):
-            continue
-        text, reason = read_skill_text(candidate)
-        metadata = None
-        if reason is None:
-            metadata, reason = parse_frontmatter(text)
-        if reason is None:
-            inspected.append(
-                (candidate.name, metadata["name"], metadata["description"], None)
-            )
-        else:
-            inspected.append((candidate.name, None, None, reason))
+        entry = inspect_skill_entry(candidate)
+        if entry is not None:
+            inspected.append(entry)
     return inspected
 
 
@@ -262,8 +268,7 @@ def render_skill_entries(entries, colored):
     return "".join(rendered)
 
 
-def render_verbose_list(rows, output):
-    colored = color_enabled(output)
+def verbose_list_column_widths(rows):
     skill_cells = [
         ", ".join(skill_entry_text(entry) for entry in entries)
         if entries
@@ -272,6 +277,12 @@ def render_verbose_list(rows, output):
     ]
     left_width = max(display_width("SKILLSET"), *(display_width(row[1]) for row in rows))
     right_width = max(display_width("SKILLS"), *(display_width(cell) for cell in skill_cells))
+    return left_width, right_width
+
+
+def render_verbose_list(rows, output):
+    colored = color_enabled(output)
+    left_width, right_width = verbose_list_column_widths(rows)
     divider = styled("|", DIM, colored)
     header_left = styled("SKILLSET", BOLD, colored)
     header_left += " " * (left_width - display_width("SKILLSET"))
@@ -363,15 +374,20 @@ def show_skill_rows(skills):
     return sorted(rows, key=lambda row: (row[0], row[1]))
 
 
+def show_column_widths(rows):
+    left_width = max(display_width("SKILL"), *(display_width(row[0]) for row in rows))
+    right_width = max(
+        display_width("DESCRIPTION"), *(display_width(row[1]) for row in rows)
+    )
+    return left_width, right_width
+
+
 def render_show(rows, output):
     colored = color_enabled(output)
     if not rows:
         print(styled("No skills installed.", DIM, colored), file=output)
         return
-    left_width = max(display_width("SKILL"), *(display_width(row[0]) for row in rows))
-    right_width = max(
-        display_width("DESCRIPTION"), *(display_width(row[1]) for row in rows)
-    )
+    left_width, right_width = show_column_widths(rows)
     header_left = styled("SKILL", BOLD, colored)
     header_left += " " * (left_width - display_width("SKILL"))
     header_right = styled("DESCRIPTION", BOLD, colored)
