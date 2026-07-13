@@ -70,6 +70,49 @@ def parser():
     return command_parser
 
 
+def dispatch_locked_command(root, arguments, home_lock, lock_file, command_parser):
+    if arguments.command == "init":
+        init(root, arguments.name)
+    elif arguments.command == "create":
+        create(root, arguments.name, arguments.source)
+        if arguments.activate:
+            use(root, arguments.name)
+    elif arguments.command == "use":
+        use(root, arguments.name)
+    elif arguments.command == "rename":
+        rename(root, arguments.old, arguments.new)
+    elif arguments.command == "remove":
+        remove(root, arguments.name, arguments.yes)
+    elif arguments.command == "list":
+        list_sets(root, arguments.verbose)
+    elif arguments.command == "current":
+        current(root)
+    elif arguments.command == "show":
+        show(root, arguments.name)
+    elif arguments.command == "skills":
+        delegate_skills(
+            root,
+            arguments.arguments,
+            home_lock,
+            lock_file,
+            command_parser,
+        )
+    else:
+        raise OperationalError(f"unsupported command: {arguments.command}")
+
+
+def run_managed_command(root, arguments, command_parser):
+    inspection = arguments.command in {"list", "current", "show"}
+    with stable_home_lock(root) as home_lock:
+        if arguments.command == "doctor":
+            return doctor(root)
+        with operation_lock(root, create=not inspection) as lock_file:
+            dispatch_locked_command(
+                root, arguments, home_lock, lock_file, command_parser
+            )
+    return 0
+
+
 def main():
     command_parser = parser()
     arguments = command_parser.parse_args()
@@ -77,44 +120,8 @@ def main():
         emit_completions(arguments.shell)
         return 0
     root = Path.home() / ".agents"
-    inspection = arguments.command in {"list", "current", "show"}
-    status = 0
     try:
-        with stable_home_lock(root) as home_lock:
-            if arguments.command == "doctor":
-                status = doctor(root)
-            else:
-                with operation_lock(root, create=not inspection) as lock_file:
-                    if arguments.command == "init":
-                        init(root, arguments.name)
-                    elif arguments.command == "create":
-                        create(root, arguments.name, arguments.source)
-                        if arguments.activate:
-                            use(root, arguments.name)
-                    elif arguments.command == "use":
-                        use(root, arguments.name)
-                    elif arguments.command == "rename":
-                        rename(root, arguments.old, arguments.new)
-                    elif arguments.command == "remove":
-                        remove(root, arguments.name, arguments.yes)
-                    elif arguments.command == "list":
-                        list_sets(root, arguments.verbose)
-                    elif arguments.command == "current":
-                        current(root)
-                    elif arguments.command == "show":
-                        show(root, arguments.name)
-                    elif arguments.command == "skills":
-                        delegate_skills(
-                            root,
-                            arguments.arguments,
-                            home_lock,
-                            lock_file,
-                            command_parser,
-                        )
-                    else:
-                        raise OperationalError(
-                            f"unsupported command: {arguments.command}"
-                        )
+        return run_managed_command(root, arguments, command_parser)
     except OperationalError as error:
         if arguments.command == "doctor":
             print(f"skillset: error: {printable_text(error)}", file=sys.stderr)
@@ -137,4 +144,3 @@ def main():
                 file=sys.stderr,
             )
         return 1
-    return status

@@ -9,8 +9,7 @@ SCOPED_SKILLS_COMMANDS = {"add", "list", "ls", "remove", "rm", "update"}
 SCOPE_FREE_SKILLS_COMMANDS = {"find", "use", "init"}
 
 
-def delegate_skills(root, arguments, home_lock, lock_file, command_parser):
-    validate_layout(root)
+def prepare_upstream_arguments(arguments, command_parser):
     upstream_arguments = list(arguments)
     if upstream_arguments:
         command = upstream_arguments[0]
@@ -35,6 +34,12 @@ def delegate_skills(root, arguments, home_lock, lock_file, command_parser):
                 file=sys.stderr,
                 flush=True,
             )
+    return upstream_arguments
+
+
+def delegate_skills(root, arguments, home_lock, lock_file, command_parser):
+    validate_layout(root)
+    upstream_arguments = prepare_upstream_arguments(arguments, command_parser)
 
     child_environment = os.environ.copy()
     child_environment.pop("XDG_STATE_HOME", None)

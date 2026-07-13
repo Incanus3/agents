@@ -354,18 +354,17 @@ def styled(value, code, enabled):
     return f"{code}{value}{RESET}" if enabled else value
 
 
-def show(root, name, output=None):
-    output = sys.stdout if output is None else output
-    colored = color_enabled(output)
-    active_name = validate_layout(root)
-    selected_name = active_name if name is None else name
-    skills = validate_set(root, selected_name) / "skills"
+def show_skill_rows(skills):
     rows = []
     for directory, declared, description, reason in inspect_skills(skills):
         left = printable_text(declared if reason is None else directory)
         right = printable_text(description) if reason is None else f"[invalid: {reason}]"
         rows.append((left, right, reason))
-    rows.sort(key=lambda row: (row[0], row[1]))
+    return sorted(rows, key=lambda row: (row[0], row[1]))
+
+
+def render_show(rows, output):
+    colored = color_enabled(output)
     if not rows:
         print(styled("No skills installed.", DIM, colored), file=output)
         return
@@ -393,6 +392,14 @@ def show(root, name, output=None):
         else:
             right_cell = right
         print(f"{left_cell} {divider} {right_cell}", file=output)
+
+
+def show(root, name, output=None):
+    output = sys.stdout if output is None else output
+    active_name = validate_layout(root)
+    selected_name = active_name if name is None else name
+    skills = validate_set(root, selected_name) / "skills"
+    render_show(show_skill_rows(skills), output)
 
 
 def printable_text(value):

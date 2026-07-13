@@ -86,6 +86,36 @@ def doctor_skills(skills, set_name, errors):
     return installed
 
 
+def doctor_skills_directory(path, name, errors):
+    skills = path / "skills"
+    try:
+        skills_mode = skills.lstat().st_mode
+    except FileNotFoundError:
+        errors.append(f"skills directory is missing: {skills}")
+    except OSError as error:
+        errors.append(f"could not inspect skills directory {skills}: {error}")
+    else:
+        if stat.S_ISLNK(skills_mode):
+            errors.append(f"skills directory symlink is not allowed: {skills}")
+        elif not stat.S_ISDIR(skills_mode):
+            errors.append(f"skills must be a real directory: {skills}")
+        else:
+            return doctor_skills(skills, name, errors)
+    return None
+
+
+def doctor_skill_inventory(name, installed, lock, warnings):
+    locked = set(lock["skills"])
+    for skill_name in sorted(installed - locked):
+        warnings.append(
+            f"installed skill directory {skill_name!r} in {name!r} is missing from the lockfile"
+        )
+    for skill_name in sorted(locked - installed):
+        warnings.append(
+            f"lockfile skill {skill_name!r} in {name!r} has no real direct skill directory"
+        )
+
+
 def doctor_set(path, name, errors, warnings):
     try:
         mode = path.lstat().st_mode
@@ -99,40 +129,14 @@ def doctor_set(path, name, errors, warnings):
         errors.append(f"skillset must be a real directory: {path}")
         return
 
-    skills = path / "skills"
-    installed = None
-    try:
-        skills_mode = skills.lstat().st_mode
-    except FileNotFoundError:
-        errors.append(f"skills directory is missing: {skills}")
-    except OSError as error:
-        errors.append(f"could not inspect skills directory {skills}: {error}")
-    else:
-        if stat.S_ISLNK(skills_mode):
-            errors.append(f"skills directory symlink is not allowed: {skills}")
-        elif not stat.S_ISDIR(skills_mode):
-            errors.append(f"skills must be a real directory: {skills}")
-        else:
-            installed = doctor_skills(skills, name, errors)
-
+    installed = doctor_skills_directory(path, name, errors)
     lock = doctor_lockfile(path / ".skill-lock.json", errors)
     if installed is None or lock is None:
         return
-    locked = set(lock["skills"])
-    for skill_name in sorted(installed - locked):
-        warnings.append(
-            f"installed skill directory {skill_name!r} in {name!r} is missing from the lockfile"
-        )
-    for skill_name in sorted(locked - installed):
-        warnings.append(
-            f"lockfile skill {skill_name!r} in {name!r} has no real direct skill directory"
-        )
+    doctor_skill_inventory(name, installed, lock, warnings)
 
 
-def doctor_inspection(root, errors, warnings):
-    skillsets = root / "skillsets"
-
-    skillsets_valid = False
+def doctor_skillsets_directory(skillsets, errors):
     try:
         skillsets_mode = skillsets.lstat().st_mode
     except FileNotFoundError:
@@ -145,12 +149,11 @@ def doctor_inspection(root, errors, warnings):
         elif not stat.S_ISDIR(skillsets_mode):
             errors.append(f"skillsets must be a real directory: {skillsets}")
         else:
-            skillsets_valid = True
+            return True
+    return False
 
-    doctor_alias(root / "skills", "active/skills", errors)
-    doctor_alias(root / ".skill-lock.json", "active/.skill-lock.json", errors)
 
-    active = root / "active"
+def doctor_active_alias(active, skillsets, skillsets_valid, errors):
     if not lexists(active):
         errors.append(f"managed active alias is missing: {active}")
     elif not active.is_symlink():
@@ -170,30 +173,41 @@ def doctor_inspection(root, errors, warnings):
             elif skillsets_valid and not lexists(skillsets / candidate):
                 errors.append(f"active target is missing: {active} -> {target}")
 
+
+def doctor_skillset_entries(skillsets, errors, warnings):
+    try:
+        entries = sorted(skillsets.iterdir(), key=lambda path: path.name)
+    except OSError as error:
+        errors.append(f"could not inspect skillsets directory {skillsets}: {error}")
+        return
+    for entry in entries:
+        if entry.name.startswith(".skillset-create-") and entry.name.endswith(
+            ".staging"
+        ):
+            errors.append(f"stale create staging path must be recovered: {entry}")
+            continue
+        if not NAME_PATTERN.fullmatch(entry.name):
+            errors.append(
+                f"invalid skillset name {entry.name!r} at {entry}; "
+                "use lowercase letters, digits, '_' or '-'"
+            )
+        doctor_set(entry, entry.name, errors, warnings)
+
+
+def doctor_inspection(root, errors, warnings):
+    skillsets = root / "skillsets"
+    skillsets_valid = doctor_skillsets_directory(skillsets, errors)
+
+    doctor_alias(root / "skills", "active/skills", errors)
+    doctor_alias(root / ".skill-lock.json", "active/.skill-lock.json", errors)
+    doctor_active_alias(root / "active", skillsets, skillsets_valid, errors)
+
     use_staging = root / ".skillset-use.staging"
     if lexists(use_staging):
         errors.append(f"stale active staging path must be recovered: {use_staging}")
 
     if skillsets_valid:
-        try:
-            entries = sorted(skillsets.iterdir(), key=lambda path: path.name)
-        except OSError as error:
-            errors.append(f"could not inspect skillsets directory {skillsets}: {error}")
-        else:
-            for entry in entries:
-                if entry.name.startswith(".skillset-create-") and entry.name.endswith(
-                    ".staging"
-                ):
-                    errors.append(
-                        f"stale create staging path must be recovered: {entry}"
-                    )
-                    continue
-                if not NAME_PATTERN.fullmatch(entry.name):
-                    errors.append(
-                        f"invalid skillset name {entry.name!r} at {entry}; "
-                        "use lowercase letters, digits, '_' or '-'"
-                    )
-                doctor_set(entry, entry.name, errors, warnings)
+        doctor_skillset_entries(skillsets, errors, warnings)
 
 
 def doctor(root):
