@@ -50,13 +50,14 @@ class SkillsetTests(unittest.TestCase):
         self,
         *arguments,
         home=None,
+        cwd=None,
         extra_environment=None,
         input_text=None,
         timeout=5,
     ):
         return subprocess.run(
             [str(SKILLSET), *arguments],
-            cwd=home or self.home,
+            cwd=cwd or home or self.home,
             env=self.environment(home, extra_environment),
             text=True,
             input=input_text,
@@ -66,7 +67,7 @@ class SkillsetTests(unittest.TestCase):
         )
 
     def run_cli_tty(
-        self, *arguments, extra_environment=None, terminal_columns=None
+        self, *arguments, cwd=None, extra_environment=None, terminal_columns=None
     ):
         environment = self.environment()
         environment.pop("NO_COLOR", None)
@@ -79,7 +80,7 @@ class SkillsetTests(unittest.TestCase):
             fcntl.ioctl(slave, termios.TIOCSWINSZ, dimensions)
         process = subprocess.Popen(
             [str(SKILLSET), *arguments],
-            cwd=self.home,
+            cwd=cwd or self.home,
             env=environment,
             stdout=slave,
             stderr=subprocess.PIPE,
@@ -137,6 +138,12 @@ class SkillsetTests(unittest.TestCase):
         skillset = root / "skillsets" / name
         (skillset / "skills").mkdir(parents=True)
         self.write_lock(skillset / ".skill-lock.json", lock)
+        return skillset
+
+    def make_manual_set(self, root, name):
+        skillset = root / "skillsets" / name
+        (skillset / "skills").mkdir(parents=True)
+        (skillset / ".skillset-manual").touch()
         return skillset
 
     def make_managed_layout(self, home, name="default"):
@@ -379,6 +386,7 @@ class SkillsetTests(unittest.TestCase):
                 "use",
                 "rename",
                 "remove",
+                "codex",
                 "skills",
                 "list",
                 "current",
@@ -420,7 +428,7 @@ class SkillsetTests(unittest.TestCase):
     def test_completion_scripts_include_the_complete_wrapper_grammar(self):
         commands = (
             "init", "create", "use", "rename", "remove", "list",
-            "current", "show", "doctor", "skills", "completions",
+            "codex", "current", "show", "doctor", "skills", "completions",
         )
         for shell in ("bash", "zsh", "fish"):
             with self.subTest(shell=shell):
@@ -428,9 +436,9 @@ class SkillsetTests(unittest.TestCase):
                 for command in commands:
                     self.assertIn(command, script)
                 options = (
-                    ("-l help", "-l from", "-l use", "-l yes", "-l verbose")
+                    ("-l help", "-l from", "-l use", "-l yes", "-l verbose", "-l fix")
                     if shell == "fish"
-                    else ("--help", "--from", "--use", "--yes", "--verbose")
+                    else ("--help", "--from", "--use", "--yes", "--verbose", "--fix")
                 )
                 for option in options:
                     self.assertIn(option, script)
@@ -450,13 +458,13 @@ class SkillsetTests(unittest.TestCase):
         outer_parser, nested_parsers = script.split('case "${words[1]}" in', 1)
         self.assertIn("_arguments -S -C \\", outer_parser)
         self.assertEqual(outer_parser.count("_arguments"), 1)
-        self.assertEqual(nested_parsers.count("_arguments"), 9)
-        self.assertEqual(nested_parsers.count("_arguments -S"), 9)
-        self.assertEqual(script.count("_arguments"), 10)
-        self.assertEqual(script.count("_arguments -S"), 10)
+        self.assertEqual(nested_parsers.count("_arguments"), 12)
+        self.assertEqual(nested_parsers.count("_arguments -S"), 12)
+        self.assertEqual(script.count("_arguments"), 13)
+        self.assertEqual(script.count("_arguments -S"), 13)
         self.assertEqual(script.count("_arguments -S -C"), 1)
         self.assertIn('-A "-*"', outer_parser)
-        self.assertEqual(nested_parsers.count("&& return 0"), 9)
+        self.assertEqual(nested_parsers.count("&& return 0"), 12)
         self.assertIn("skills) return 0 ;;", script)
         self.assertIn(
             'if [[ "${zsh_eval_context[-1]}" == loadautofunc ]]; then',
@@ -494,7 +502,15 @@ printf 'new:%s\n' "${#COMPREPLY[@]}"
 COMP_WORDS=(skillset use -- -); COMP_CWORD=3; _skillset_completion
 printf 'terminator:%s\n' "${#COMPREPLY[@]}"
 COMP_WORDS=(skillset skills l); COMP_CWORD=2; _skillset_completion
-printf 'skills:%s\n' "${#COMPREPLY[@]}"'''
+printf 'skills:%s\n' "${#COMPREPLY[@]}"
+COMP_WORDS=(skillset codex e); COMP_CWORD=2; _skillset_completion
+printf 'codex-command:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(skillset codex enable d); COMP_CWORD=3; _skillset_completion
+printf 'codex-enable:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(skillset codex enable --local d); COMP_CWORD=4; _skillset_completion
+printf 'codex-local-enable:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(skillset codex list --v); COMP_CWORD=3; _skillset_completion
+printf 'codex-list:%s\n' "${COMPREPLY[*]}"'''
         result = subprocess.run(
             [bash, "-c", probe, "bash", str(script)],
             env=environment,
@@ -510,7 +526,9 @@ printf 'skills:%s\n' "${#COMPREPLY[@]}"'''
                 "from:--from=default --from=demo",
                 "from-split:default demo", "from-empty:default demo",
                 "from-separated:default demo", "new:0",
-                "terminator:0", "skills:0",
+                "terminator:0", "skills:0", "codex-command:enable",
+                "codex-enable:default demo", "codex-local-enable:default demo",
+                "codex-list:--verbose",
             ],
         )
 
@@ -545,6 +563,9 @@ printf 'skills:%s\n' "${#COMPREPLY[@]}"'''
         self.assertNotIn("commandline -opc", generated.stdout)
         self.assertEqual(candidates("skillset rename default n"), [])
         self.assertEqual(candidates("skillset skills l"), [])
+        self.assertEqual(candidates("skillset codex e"), ["enable"])
+        self.assertEqual(candidates("skillset codex enable d"), ["default", "demo"])
+        self.assertEqual(candidates("skillset codex list --v"), ["--verbose"])
 
     def test_completion_name_lookup_discards_stdout_on_failure(self):
         stub_directory = self.sandbox / "failed-list-bin"
@@ -684,6 +705,65 @@ _skillset'''
         self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
         self.assert_no_doctor_findings(result)
         self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_doctor_fix_creates_a_missing_empty_skillset_lockfile_after_confirmation(self):
+        self.initialize()
+        lockfile = self.root / "skillsets" / "default" / ".skill-lock.json"
+        lockfile.unlink()
+
+        result = self.run_cli("doctor", "--fix", input_text="yes\n")
+
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assertIn("Create these safe replacement files?", result.stderr)
+        self.assertIn(str(lockfile), result.stderr)
+        self.assertIn(f"skillset: repaired: created {lockfile}", result.stderr)
+        self.assertEqual(json.loads(lockfile.read_text(encoding="utf-8")), EMPTY_LOCK)
+        diagnosed = self.run_cli("doctor")
+        self.assertEqual(diagnosed.returncode, 0, diagnosed.stderr)
+        self.assert_no_doctor_findings(diagnosed)
+
+    def test_doctor_fix_does_not_mutate_when_confirmation_is_declined(self):
+        self.initialize()
+        lockfile = self.root / "skillsets" / "default" / ".skill-lock.json"
+        lockfile.unlink()
+        before = self.filesystem_snapshot(self.home)
+
+        result = self.run_cli("doctor", "--fix", input_text="no\n")
+
+        self.assert_refused(result)
+        self.assertIn("Proceed? [y/N]", result.stderr)
+        self.assertIn("lockfile is missing", result.stderr)
+        self.assertFalse(lockfile.exists())
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_doctor_fix_never_invents_lock_metadata_for_nonempty_skills(self):
+        self.initialize()
+        skills = self.root / "skillsets" / "default" / "skills"
+        self.write_skill(skills, "existing", """
+            name: existing
+            description: retained without guessed lock metadata
+        """)
+        lockfile = self.root / "skillsets" / "default" / ".skill-lock.json"
+        lockfile.unlink()
+
+        result = self.run_cli("doctor", "--fix", input_text="yes\n")
+
+        self.assert_refused(result)
+        self.assertNotIn("Create these safe replacement files?", result.stderr)
+        self.assertIn("lockfile is missing", result.stderr)
+        self.assertFalse(lockfile.exists())
+
+    def test_doctor_fix_recreates_a_missing_advisory_lock_after_confirmation(self):
+        self.initialize()
+        advisory_lock = self.root / ".skillset.lock"
+        advisory_lock.unlink()
+
+        result = self.run_cli("doctor", "--fix", input_text="y\n")
+
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assertIn(str(advisory_lock), result.stderr)
+        self.assertIn(f"skillset: repaired: created {advisory_lock}", result.stderr)
+        self.assertTrue(advisory_lock.is_file())
 
     def test_doctor_aggregates_pristine_home_without_creating_agents_root(self):
         before = self.filesystem_snapshot(self.home)
@@ -1253,6 +1333,7 @@ _skillset'''
             ("rename", "victim", "renamed"),
             ("remove", "victim", "--yes"),
             ("list",),
+            ("codex", "list"),
             ("current",),
             ("show", "default"),
             ("skills", "list"),
@@ -1316,6 +1397,146 @@ _skillset'''
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "alpha\n* middle\nzeta\n")
         self.assertEqual(result.stderr, "")
+
+    def test_codex_enable_disable_and_list_manage_only_canonical_links(self):
+        self.initialize()
+        self.make_set(self.root, "personal")
+        codex_skills = self.home / ".codex" / "skills"
+        codex_skills.mkdir(parents=True)
+        (codex_skills / "unmanaged").mkdir()
+
+        enabled = self.run_cli("codex", "enable", "personal")
+        listed = self.run_cli("codex", "list")
+        verbose = self.run_cli("codex", "list", "--verbose")
+
+        link = codex_skills / "personal"
+        self.assertEqual(enabled.returncode, 0, enabled.stderr)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(
+            os.readlink(link), str(self.root / "skillsets" / "personal" / "skills")
+        )
+        self.assertEqual(listed.stdout, "[g] personal\n")
+        self.assertEqual(
+            verbose.stdout,
+            "  SKILLSET     | SKILLS\n"
+            "  -------------|------------\n"
+            "  [g] personal | (no skills)\n",
+        )
+
+        enabled_active = self.run_cli("codex", "enable", "default")
+        listed_active = self.run_cli("codex", "list")
+        disabled = self.run_cli("codex", "disable", "personal")
+        after_disable = self.run_cli("codex", "list")
+
+        self.assertEqual(enabled_active.returncode, 0, enabled_active.stderr)
+        self.assertEqual(listed_active.stdout, "[g] default\n[g] personal\n")
+        self.assertEqual(disabled.returncode, 0, disabled.stderr)
+        self.assertFalse(os.path.lexists(link))
+        self.assertTrue((codex_skills / "unmanaged").is_dir())
+        self.assertEqual(after_disable.stdout, "[g] default\n")
+
+    def test_codex_operations_refuse_noncanonical_links_without_mutation(self):
+        self.initialize()
+        codex_skills = self.home / ".codex" / "skills"
+        codex_skills.mkdir(parents=True)
+        link = codex_skills / "default"
+        link.symlink_to("/tmp/unmanaged-skills")
+        before = self.filesystem_snapshot(self.home)
+
+        for arguments in (("codex", "enable", "default"), ("codex", "disable", "default")):
+            with self.subTest(arguments=arguments):
+                result = self.run_cli(*arguments)
+                self.assert_refused(result)
+                self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+        listed = self.run_cli("codex", "list")
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertEqual(listed.stdout, "")
+
+    def test_codex_list_and_disable_accept_an_absolute_link_with_trailing_slash(self):
+        self.initialize()
+        codex_skills = self.home / ".codex" / "skills"
+        codex_skills.mkdir(parents=True)
+        link = codex_skills / "default"
+        link.symlink_to(str(self.root / "skillsets" / "default" / "skills") + "/")
+
+        listed = self.run_cli("codex", "list")
+        disabled = self.run_cli("codex", "disable", "default")
+
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertEqual(listed.stdout, "[g] default\n")
+        self.assertEqual(disabled.returncode, 0, disabled.stderr)
+        self.assertFalse(os.path.lexists(link))
+
+    def test_codex_local_scope_is_independent_and_visibly_labeled(self):
+        self.initialize()
+        self.make_set(self.root, "personal")
+        project = self.sandbox / "project"
+        project.mkdir()
+
+        global_enabled = self.run_cli("codex", "enable", "default")
+        local_enabled = self.run_cli(
+            "codex", "enable", "-l", "personal", cwd=project
+        )
+        global_list = self.run_cli("codex", "list", "-g")
+        local_list = self.run_cli("codex", "list", "-l", cwd=project)
+        combined_list = self.run_cli("codex", "list", cwd=project)
+        local_verbose = self.run_cli(
+            "codex", "list", "--local", "--verbose", cwd=project
+        )
+
+        self.assertEqual(global_enabled.returncode, 0, global_enabled.stderr)
+        self.assertEqual(local_enabled.returncode, 0, local_enabled.stderr)
+        self.assertTrue((self.home / ".codex" / "skills" / "default").is_symlink())
+        self.assertTrue((project / ".codex" / "skills" / "personal").is_symlink())
+        self.assertEqual(global_list.stdout, "default\n")
+        self.assertEqual(local_list.stdout, "personal\n")
+        self.assertEqual(combined_list.stdout, "[g] default\n[l] personal\n")
+        self.assertEqual(
+            local_verbose.stdout,
+            "  SKILLSET | SKILLS\n"
+            "  ---------|------------\n"
+            "  personal | (no skills)\n",
+        )
+        local_disabled = self.run_cli(
+            "codex", "disable", "personal", "-l", cwd=project
+        )
+        self.assertEqual(local_disabled.returncode, 0, local_disabled.stderr)
+        self.assertFalse(os.path.lexists(project / ".codex" / "skills" / "personal"))
+        self.assertTrue((self.home / ".codex" / "skills" / "default").is_symlink())
+
+    def test_codex_combined_list_colorizes_scope_labels_only(self):
+        self.initialize()
+        self.make_set(self.root, "personal")
+        project = self.sandbox / "project-colored"
+        project.mkdir()
+        self.assertEqual(self.run_cli("codex", "enable", "default").returncode, 0)
+        self.assertEqual(
+            self.run_cli("codex", "enable", "personal", "-l", cwd=project).returncode,
+            0,
+        )
+
+        combined = self.run_cli_tty("codex", "list", cwd=project)
+        global_only = self.run_cli_tty("codex", "list", "-g", cwd=project)
+
+        self.assertEqual(combined.returncode, 0, combined.stderr)
+        self.assertIn("\x1b[36m[g]\x1b[0m default", combined.stdout)
+        self.assertIn("\x1b[32m[l]\x1b[0m personal", combined.stdout)
+        self.assertEqual(global_only.returncode, 0, global_only.stderr)
+        self.assertNotIn("[g]", global_only.stdout)
+
+    def test_codex_enabled_skillsets_must_be_disabled_before_rename_or_remove(self):
+        self.initialize()
+        self.make_set(self.root, "personal")
+        self.assertEqual(self.run_cli("codex", "enable", "personal").returncode, 0)
+        before = self.filesystem_snapshot(self.home)
+
+        renamed = self.run_cli("rename", "personal", "renamed")
+        removed = self.run_cli("remove", "personal", "--yes")
+
+        self.assert_refused(renamed)
+        self.assert_refused(removed)
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
 
     def test_verbose_list_prints_aligned_complete_inventory_for_both_flags(self):
         self.initialize()
@@ -1775,7 +1996,7 @@ _skillset'''
         self.write_skill(skills, "folded-directory", """
             name: >
               folded
-            description: >
+            description: >-
               folded line
               next   line
         """)
@@ -1822,6 +2043,25 @@ _skillset'''
             ],
         )
         self.assertEqual(result.stderr, "")
+
+    def test_doctor_accepts_chomped_block_scalar_metadata(self):
+        self.initialize()
+        skills = self.root / "skillsets" / "default" / "skills"
+        self.write_skill(skills, "chomped", """
+            name: chomped
+            description: >-
+              a folded description
+              with trailing-newline chomping
+        """)
+        self.write_lock(
+            self.root / "skillsets" / "default" / ".skill-lock.json",
+            {"version": 3, "skills": {"chomped": {}}, "dismissed": {}},
+        )
+
+        result = self.run_cli("doctor")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_no_doctor_findings(result)
 
     def test_show_visibly_escapes_metadata_terminal_controls(self):
         self.initialize()
@@ -1990,7 +2230,7 @@ _skillset'''
         self.assertEqual(self.filesystem_snapshot(self.home), before)
 
     def test_inspection_commands_reject_uninitialized_and_invalid_layouts_read_only(self):
-        commands = (("list",), ("current",), ("show", "default"))
+        commands = (("list",), ("codex", "list"), ("current",), ("show", "default"))
         for index, arguments in enumerate(commands):
             with self.subTest(layout="uninitialized", command=arguments[0]):
                 home = self.new_home(f"inspection-uninitialized-{index}")
@@ -2051,6 +2291,9 @@ _skillset'''
             ("list",),
             ("list", "-v"),
             ("list", "--verbose"),
+            ("codex", "list"),
+            ("codex", "list", "-v"),
+            ("codex", "list", "--verbose"),
             ("current",),
             ("show", "default"),
         ):
@@ -2063,6 +2306,7 @@ _skillset'''
         self.initialize()
         expected = {
             ("list",): "* default\n",
+            ("codex", "list"): "",
             ("current",): "default\n",
             ("show", "default"): "No skills installed.\n",
         }
@@ -2420,6 +2664,14 @@ _skillset'''
             ("remove", "default", "--unknown"),
             ("list", "extra"),
             ("list", "--unknown"),
+            ("codex",),
+            ("codex", "unknown"),
+            ("codex", "enable"),
+            ("codex", "disable"),
+            ("codex", "list", "extra"),
+            ("codex", "list", "--unknown"),
+            ("codex", "enable", "default", "--global", "--local"),
+            ("codex", "list", "--global", "--local"),
             ("current", "extra"),
             ("current", "--verbose"),
             ("show", "default", "extra"),
@@ -2589,6 +2841,127 @@ _skillset'''
         self.assert_empty_set(self.root, "experiment")
         self.assertEqual(os.readlink(self.root / "active"), active_before)
 
+    def test_manual_skillset_creation_activation_and_display(self):
+        self.initialize()
+
+        created = self.run_cli("create", "--manual", "personal")
+        self.assertEqual(created.returncode, 0, created.stderr)
+        personal = self.root / "skillsets" / "personal"
+        self.assertTrue((personal / "skills").is_dir())
+        self.assertTrue((personal / ".skillset-manual").is_file())
+        self.assertEqual((personal / ".skillset-manual").stat().st_size, 0)
+        self.assertFalse(os.path.lexists(personal / ".skill-lock.json"))
+        self.assertEqual(self.run_cli("list").stdout, "* default\npersonal [m]\n")
+        verbose = self.run_cli("list", "--verbose")
+        self.assertEqual(verbose.returncode, 0, verbose.stderr)
+        verbose_lines = verbose.stdout.splitlines()
+        self.assertIn("personal [m]", verbose.stdout)
+        self.assertEqual(
+            {line.index("|") for line in verbose_lines if "|" in line},
+            {verbose_lines[0].index("|")},
+        )
+        self.assertEqual(
+            self.run_cli("show", "personal").stdout,
+            "Manual skillset [m]: no upstream lock metadata.\nNo skills installed.\n",
+        )
+
+        activated = self.run_cli("use", "personal")
+        self.assertEqual(activated.returncode, 0, activated.stderr)
+        self.assertEqual(os.readlink(self.root / "active"), "skillsets/personal")
+        self.assertEqual(os.readlink(self.root / ".skill-lock.json"), "../.skillset-manual-empty-lock.json")
+        sentinel = self.home / ".skillset-manual-empty-lock.json"
+        self.assertEqual(json.loads(sentinel.read_text(encoding="utf-8")), EMPTY_LOCK)
+        self.assertEqual(stat.S_IMODE(sentinel.stat().st_mode), 0o444)
+        self.assertEqual(self.run_cli("list").stdout, "default\n* personal [m]\n")
+        tty = self.run_cli_tty("list")
+        self.assertEqual(tty.returncode, 0, tty.stderr)
+        self.assertIn("\x1b[33m[m]\x1b[0m", tty.stdout)
+
+        sentinel.chmod(0o644)
+        sentinel.unlink()
+        recreated = self.run_cli("use", "personal")
+        self.assertEqual(recreated.returncode, 0, recreated.stderr)
+        self.assertEqual(stat.S_IMODE(sentinel.stat().st_mode), 0o444)
+
+        sentinel.chmod(0o644)
+        sentinel.unlink()
+        repaired = self.run_cli("doctor", "--fix", input_text="yes\n")
+        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        self.assertEqual(stat.S_IMODE(sentinel.stat().st_mode), 0o444)
+        mutually_exclusive = self.run_cli(
+            "create", "--manual", "--from", "default", "invalid"
+        )
+        self.assertEqual(mutually_exclusive.returncode, 2)
+
+    def test_manual_classification_rejects_marker_and_lock_misconfigurations(self):
+        cases = ("unmarked", "both", "nonempty-marker", "symlink-marker")
+        for index, case in enumerate(cases):
+            with self.subTest(case=case):
+                home = self.new_home(f"manual-classification-{index}")
+                root = self.make_managed_layout(home)
+                target = root / "skillsets" / "broken"
+                (target / "skills").mkdir(parents=True)
+                if case == "both":
+                    (target / ".skillset-manual").touch()
+                    self.write_lock(target / ".skill-lock.json")
+                elif case == "nonempty-marker":
+                    (target / ".skillset-manual").write_text("not empty", encoding="utf-8")
+                elif case == "symlink-marker":
+                    external = home / "marker"
+                    external.touch()
+                    (target / ".skillset-manual").symlink_to(external)
+
+                result = self.run_cli("use", "broken", home=home)
+                self.assert_refused(result)
+                self.assertEqual(os.readlink(root / "active"), "skillsets/default")
+
+    def test_manual_clone_preserves_mode_and_lock_aware_delegation_refuses_before_npx(self):
+        self.initialize()
+        self.assertEqual(self.run_cli("create", "--manual", "personal").returncode, 0)
+        source = self.root / "skillsets" / "personal"
+        (source / "skills" / "handwritten").mkdir()
+        cloned = self.run_cli("create", "copy", "--from", "personal")
+        self.assertEqual(cloned.returncode, 0, cloned.stderr)
+        copy = self.root / "skillsets" / "copy"
+        self.assertTrue((copy / ".skillset-manual").is_file())
+        self.assertFalse(os.path.lexists(copy / ".skill-lock.json"))
+        self.assertTrue((copy / "skills" / "handwritten").is_dir())
+
+        self.assertEqual(self.run_cli("use", "personal").returncode, 0)
+        environment, record = self.fake_npx_environment()
+        refused = self.run_cli("skills", "update", extra_environment=environment)
+        self.assert_refused(refused)
+        self.assertIn("manually managed", refused.stderr)
+        self.assertFalse(record.exists())
+        passed = self.run_cli("skills", "find", "handwritten", extra_environment=environment)
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assert_fake_argv(record, ["skills", "find", "handwritten"])
+
+    def test_doctor_fix_completes_verified_interrupted_manual_activation(self):
+        self.initialize()
+        self.assertEqual(self.run_cli("create", "--manual", "personal").returncode, 0)
+        fault = self.fault_environment(f"""
+            import os
+            target = {str(self.root / 'active')!r}
+            original_replace = os.replace
+            def fail_after_active(source, destination, *args, **kwargs):
+                result = original_replace(source, destination, *args, **kwargs)
+                if os.path.abspath(os.fspath(destination)) == target:
+                    raise OSError("injected interruption after active replacement")
+                return result
+            os.replace = fail_after_active
+        """)
+        interrupted = self.run_cli("use", "personal", extra_environment=fault)
+        self.assert_refused(interrupted)
+        self.assertTrue(os.path.lexists(self.root / ".skillset-use.staging"))
+        self.assertEqual(os.readlink(self.root / "active"), "skillsets/personal")
+        self.assertEqual(os.readlink(self.root / ".skill-lock.json"), "active/.skill-lock.json")
+
+        repaired = self.run_cli("doctor", "--fix", input_text="yes\n")
+        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        self.assertEqual(os.readlink(self.root / ".skill-lock.json"), "../.skillset-manual-empty-lock.json")
+        self.assertFalse(os.path.lexists(self.root / ".skillset-use.staging"))
+
     def test_create_from_clones_complete_state_exactly(self):
         self.initialize()
         source = self.root / "skillsets" / "default"
@@ -2669,7 +3042,7 @@ _skillset'''
         self.assert_refused(result)
         self.assert_empty_set(self.root, "experiment")
         self.assertEqual({name: os.readlink(self.root / name) for name in stable}, stable)
-        self.assertFalse(os.path.lexists(self.root / ".skillset-use.staging"))
+        self.assertTrue(os.path.lexists(self.root / ".skillset-use.staging"))
 
     def test_create_use_post_replace_failure_preserves_committed_activation(self):
         self.initialize()
@@ -2688,7 +3061,7 @@ _skillset'''
         self.assert_refused(result)
         self.assert_empty_set(self.root, "experiment")
         self.assert_aliases(self.root, "experiment")
-        self.assertFalse(os.path.lexists(self.root / ".skillset-use.staging"))
+        self.assertTrue(os.path.lexists(self.root / ".skillset-use.staging"))
 
     def test_create_help_documents_create_options(self):
         result = self.run_cli("create", "--help")

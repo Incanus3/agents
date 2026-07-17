@@ -1,9 +1,25 @@
 import os
 import stat
 import sys
+import json
 
 from .errors import OperationalError
-from .layout import NAME_PATTERN, doctor_operation_lock, lexists, read_lockfile
+from .layout import (
+    NAME_PATTERN,
+    doctor_operation_lock,
+    ensure_manual_sentinel,
+    lexists,
+    MANUAL_MARKER,
+    MANUAL_SENTINEL,
+    manual_sentinel_path,
+    operation_lock,
+    read_lockfile,
+    real_kind,
+    set_mode,
+    USE_STAGING,
+    validate_manual_sentinel,
+    write_empty_lock,
+)
 from .metadata import parse_frontmatter, printable_text, read_skill_text
 
 
@@ -54,6 +70,27 @@ def doctor_lockfile(path, errors):
     except Exception as error:
         errors.append(f"could not read lockfile {path}: {error}")
         return None
+
+
+def doctor_manual_marker(path, errors):
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        errors.append(f"could not inspect manual marker {path}: {error}")
+        return False
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        errors.append(f"manual marker must be a real empty regular file: {path}")
+        return False
+    try:
+        if path.stat().st_size != 0:
+            errors.append(f"manual marker must be empty: {path}")
+            return False
+    except OSError as error:
+        errors.append(f"could not inspect manual marker {path}: {error}")
+        return False
+    return True
 
 
 def classify_skill_entry(candidate, set_name, errors):
@@ -138,19 +175,30 @@ def doctor_set(path, name, errors, warnings):
         mode = path.lstat().st_mode
     except OSError as error:
         errors.append(f"could not inspect skillset {name!r} at {path}: {error}")
-        return
+        return None
     if stat.S_ISLNK(mode):
         errors.append(f"skillset directory symlink is not allowed: {path}")
-        return
+        return None
     if not stat.S_ISDIR(mode):
         errors.append(f"skillset must be a real directory: {path}")
-        return
+        return None
 
     installed = doctor_skills_directory(path, name, errors)
-    lock = doctor_lockfile(path / ".skill-lock.json", errors)
+    marker = path / MANUAL_MARKER
+    lockfile = path / ".skill-lock.json"
+    marker_exists = lexists(marker)
+    if marker_exists:
+        marker_valid = doctor_manual_marker(marker, errors)
+        if lexists(lockfile):
+            errors.append(f"manual skillset must not contain a lockfile: {lockfile}")
+        if installed is None or not marker_valid or lexists(lockfile):
+            return None
+        return "manual"
+    lock = doctor_lockfile(lockfile, errors)
     if installed is None or lock is None:
-        return
+        return None
     doctor_skill_inventory(name, installed, lock, warnings)
+    return "managed"
 
 
 def doctor_skillsets_directory(skillsets, errors):
@@ -173,13 +221,16 @@ def doctor_skillsets_directory(skillsets, errors):
 def doctor_active_alias(active, skillsets, skillsets_valid, errors):
     if not lexists(active):
         errors.append(f"managed active alias is missing: {active}")
+        return None
     elif not active.is_symlink():
         errors.append(f"managed active alias must be a symlink: {active}")
+        return None
     else:
         try:
             target = os.readlink(active)
         except OSError as error:
             errors.append(f"could not read managed active alias {active}: {error}")
+            return None
         else:
             prefix = "skillsets/"
             candidate = target[len(prefix) :] if target.startswith(prefix) else ""
@@ -187,8 +238,15 @@ def doctor_active_alias(active, skillsets, skillsets_valid, errors):
                 errors.append(
                     f"active alias has a noncanonical target; expected skillsets/NAME: {target}"
                 )
+                return None
             elif skillsets_valid and not lexists(skillsets / candidate):
                 errors.append(f"active target is missing: {active} -> {target}")
+                return None
+            elif not skillsets_valid:
+                return None
+            else:
+                return candidate
+    return None
 
 
 def doctor_skillset_entries(skillsets, errors, warnings):
@@ -211,23 +269,152 @@ def doctor_skillset_entries(skillsets, errors, warnings):
         doctor_set(entry, entry.name, errors, warnings)
 
 
+def canonical_use_record(record):
+    return json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n"
+
+
+def valid_active_target(target):
+    prefix = "skillsets/"
+    name = target[len(prefix) :] if isinstance(target, str) and target.startswith(prefix) else ""
+    return target == prefix + name and bool(NAME_PATTERN.fullmatch(name))
+
+
+def read_use_staging(root, errors=None):
+    path = root / USE_STAGING
+    if not real_kind(path, stat.S_ISREG):
+        if errors is not None:
+            errors.append(f"stale activation staging record must be a real regular file: {path}")
+        return None
+    try:
+        contents = path.read_text(encoding="utf-8")
+        record = json.loads(contents)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        if errors is not None:
+            errors.append(f"stale activation staging record is invalid {path}: {error}")
+        return None
+    if (
+        not isinstance(record, dict)
+        or record.get("version") != 1
+        or set(record) != {"version", "old", "new"}
+        or not all(isinstance(record.get(key), dict) and set(record[key]) == {"active", "lock"}
+                   for key in ("old", "new"))
+        or any(not isinstance(record[key][field], str)
+               for key in ("old", "new") for field in ("active", "lock"))
+        or contents != canonical_use_record(record)
+    ):
+        if errors is not None:
+            errors.append(f"stale activation staging record is malformed or noncanonical: {path}")
+        return None
+    for side in ("old", "new"):
+        active = record[side]["active"]
+        lock = record[side]["lock"]
+        if not valid_active_target(active) or lock not in {"active/.skill-lock.json", MANUAL_SENTINEL}:
+            if errors is not None:
+                errors.append(f"stale activation staging record is malformed or noncanonical: {path}")
+            return None
+        name = active[len("skillsets/") :]
+        try:
+            expected_lock = MANUAL_SENTINEL if set_mode(root, name) == "manual" else "active/.skill-lock.json"
+        except OperationalError as error:
+            if errors is not None:
+                errors.append(f"stale activation staging target is invalid for {name!r}: {error}")
+            return None
+        if lock != expected_lock:
+            if errors is not None:
+                errors.append(f"stale activation staging record has a mode-mismatched lock target: {path}")
+            return None
+    for alias, field in ((root / "active", "active"), (root / ".skill-lock.json", "lock")):
+        if not alias.is_symlink():
+            if errors is not None:
+                errors.append(f"stale activation staging cannot recover non-symlink alias: {alias}")
+            return None
+        try:
+            actual = os.readlink(alias)
+        except OSError as error:
+            if errors is not None:
+                errors.append(f"could not read stale activation alias {alias}: {error}")
+            return None
+        if actual not in {record["old"][field], record["new"][field]}:
+            if errors is not None:
+                errors.append(f"stale activation staging has an unknown alias target: {alias} -> {actual}")
+            return None
+    return record
+
+
+def replace_recovery_alias(root, name, target):
+    destination = root / name
+    temporary = root / f".{name.lstrip('.')}.skillset-recovery-link.staging"
+    try:
+        os.symlink(target, temporary)
+        os.replace(temporary, destination)
+    finally:
+        if lexists(temporary):
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
+def recover_staged_use(root):
+    errors = []
+    record = read_use_staging(root, errors)
+    if record is None:
+        raise OperationalError("; ".join(errors))
+    try:
+        if record["new"]["lock"] == MANUAL_SENTINEL:
+            validate_manual_sentinel(root)
+        replace_recovery_alias(root, "active", record["new"]["active"])
+        replace_recovery_alias(root, ".skill-lock.json", record["new"]["lock"])
+        active = root / "active"
+        lock = root / ".skill-lock.json"
+        if not (
+            active.is_symlink()
+            and lock.is_symlink()
+            and os.readlink(active) == record["new"]["active"]
+            and os.readlink(lock) == record["new"]["lock"]
+        ):
+            raise OperationalError("activation aliases did not reach their intended targets")
+        (root / USE_STAGING).unlink()
+    except OperationalError:
+        raise
+    except Exception as error:
+        raise OperationalError(
+            f"could not complete interrupted activation; staging was retained at {root / USE_STAGING}: {error}"
+        ) from error
+
+
 def doctor_inspection(root, errors, warnings):
     skillsets = root / "skillsets"
     skillsets_valid = doctor_skillsets_directory(skillsets, errors)
 
     doctor_alias(root / "skills", "active/skills", errors)
-    doctor_alias(root / ".skill-lock.json", "active/.skill-lock.json", errors)
-    doctor_active_alias(root / "active", skillsets, skillsets_valid, errors)
+    active_name = doctor_active_alias(root / "active", skillsets, skillsets_valid, errors)
+    if active_name is None:
+        doctor_alias(root / ".skill-lock.json", "active/.skill-lock.json", errors)
+    else:
+        active_path = skillsets / active_name
+        manual = lexists(active_path / MANUAL_MARKER)
+        lock_target = MANUAL_SENTINEL if manual else "active/.skill-lock.json"
+        doctor_alias(root / ".skill-lock.json", lock_target, errors)
+        if manual:
+            try:
+                validate_manual_sentinel(root)
+            except OperationalError as error:
+                errors.append(str(error))
 
-    use_staging = root / ".skillset-use.staging"
+    use_staging = root / USE_STAGING
     if lexists(use_staging):
-        errors.append(f"stale active staging path must be recovered: {use_staging}")
+        staging_errors = []
+        if read_use_staging(root, staging_errors) is None:
+            errors.extend(staging_errors)
+        else:
+            errors.append(f"interrupted activation must be completed: {use_staging}")
 
     if skillsets_valid:
         doctor_skillset_entries(skillsets, errors, warnings)
 
 
-def doctor(root):
+def doctor_findings(root):
     errors = []
     warnings = []
     try:
@@ -247,8 +434,134 @@ def doctor(root):
     else:
         with doctor_operation_lock(root, errors):
             doctor_inspection(root, errors, warnings)
+    return errors, warnings
+
+
+def safe_repair_candidates(root):
+    """Return missing files that can be recreated without guessing metadata."""
+    if not real_kind(root, stat.S_ISDIR):
+        return []
+
+    advisory_lock = root / ".skillset.lock"
+    if lexists(advisory_lock) and not real_kind(advisory_lock, stat.S_ISREG):
+        return []
+
+    candidates = []
+    if not lexists(advisory_lock):
+        candidates.append(advisory_lock)
+
+    skillsets = root / "skillsets"
+    if not real_kind(skillsets, stat.S_ISDIR):
+        return candidates
+    try:
+        entries = sorted(skillsets.iterdir(), key=lambda path: path.name)
+    except OSError:
+        return candidates
+    active = root / "active"
+    if active.is_symlink():
+        try:
+            target = os.readlink(active)
+            prefix = "skillsets/"
+            active_name = target[len(prefix) :] if target.startswith(prefix) else ""
+            if target == prefix + active_name and NAME_PATTERN.fullmatch(active_name):
+                if set_mode(root, active_name) == "manual":
+                    sentinel = manual_sentinel_path(root)
+                    if not lexists(sentinel):
+                        candidates.append(sentinel)
+        except (OSError, OperationalError):
+            pass
+    for entry in entries:
+        if not NAME_PATTERN.fullmatch(entry.name) or not real_kind(entry, stat.S_ISDIR):
+            continue
+        skills = entry / "skills"
+        marker = entry / MANUAL_MARKER
+        lockfile = entry / ".skill-lock.json"
+        if (
+            not real_kind(skills, stat.S_ISDIR)
+            or lexists(marker)
+            or lexists(lockfile)
+        ):
+            continue
+        try:
+            if any(skills.iterdir()):
+                continue
+        except OSError:
+            continue
+        candidates.append(lockfile)
+    return candidates
+
+
+def confirm_repairs(candidates):
+    print("Create these safe replacement files?", file=sys.stderr)
+    for candidate in candidates:
+        print(f"  {candidate}", file=sys.stderr)
+    print("Proceed? [y/N] ", end="", file=sys.stderr, flush=True)
+    return sys.stdin.readline().strip().lower() in {"y", "yes"}
+
+
+def repair_empty_lockfiles(root):
+    repaired = []
+    for candidate in safe_repair_candidates(root):
+        if candidate == manual_sentinel_path(root):
+            try:
+                ensure_manual_sentinel(root)
+            except OperationalError:
+                raise
+            repaired.append(candidate)
+            continue
+        if candidate.name != ".skill-lock.json":
+            continue
+        try:
+            write_empty_lock(candidate)
+        except FileExistsError:
+            continue
+        except OSError as error:
+            raise OperationalError(
+                f"could not create replacement lockfile {candidate}: {error}"
+            ) from error
+        repaired.append(candidate)
+    return repaired
+
+
+def emit_findings(errors, warnings):
     for message in sorted(errors):
         print(f"skillset: error: {printable_text(message)}", file=sys.stderr)
     for message in sorted(warnings):
         print(f"skillset: warning: {printable_text(message)}", file=sys.stderr)
+
+
+def doctor(root, fix=False):
+    errors, warnings = doctor_findings(root)
+    if not fix:
+        emit_findings(errors, warnings)
+        return 1 if errors else 0
+
+    staged_errors = []
+    staged = read_use_staging(root, staged_errors) if lexists(root / USE_STAGING) else None
+    if staged is not None:
+        print("Complete the verified interrupted activation? [y/N] ", end="", file=sys.stderr, flush=True)
+        if sys.stdin.readline().strip().lower() not in {"y", "yes"}:
+            emit_findings(errors, warnings)
+            return 1
+        with operation_lock(root, create=False):
+            recover_staged_use(root)
+        errors, warnings = doctor_findings(root)
+
+    candidates = safe_repair_candidates(root)
+    if not candidates or not confirm_repairs(candidates):
+        emit_findings(errors, warnings)
+        return 1 if errors else 0
+
+    advisory_lock = root / ".skillset.lock"
+    advisory_was_missing = advisory_lock in candidates
+    with operation_lock(root, create=True):
+        repaired = repair_empty_lockfiles(root)
+        errors = []
+        warnings = []
+        doctor_inspection(root, errors, warnings)
+    if advisory_was_missing and real_kind(advisory_lock, stat.S_ISREG):
+        repaired.insert(0, advisory_lock)
+    for candidate in repaired:
+        print(f"skillset: repaired: created {candidate}", file=sys.stderr)
+    emit_findings(errors, warnings)
     return 1 if errors else 0

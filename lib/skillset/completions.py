@@ -3,13 +3,14 @@
 import sys
 
 
-COMMANDS = "init create use rename remove list current show doctor skills completions"
+COMMANDS = "init create use rename remove list codex current show doctor skills completions"
 
 BASH = rf"""_skillset_names() {{
     local output line
     output="$(command skillset list 2>/dev/null)" || return 0
     while IFS= read -r line; do
-        printf '%s\n' "${{line#\* }}"
+        line="${{line#\* }}"
+        printf '%s\n' "${{line% \[m\]}}"
     done <<< "$output"
 }}
 
@@ -26,7 +27,7 @@ _skillset_positional_count() {{
                 if [[ "${{COMP_WORDS[index+1]}}" == = ]]; then skip=2; else skip=1; fi
                 ;;
             --from=*) ;;
-            -h|--help|--use|--yes|-v|--verbose) ;;
+            -h|--help|--manual|--use|--yes|-v|--verbose|--fix|-g|--global|-l|--local) ;;
             -*) ;;
             *) ((count++)) ;;
         esac
@@ -72,7 +73,7 @@ _skillset_completion() {{
                 return
             fi
             candidates=''
-            if (( ! after_terminator )); then candidates='-h --help -f --from --use'; fi
+            if (( ! after_terminator )); then candidates='-h --help -f --from --manual --use'; fi
             ;;
         use|remove|show)
             candidates=''
@@ -89,14 +90,35 @@ _skillset_completion() {{
             candidates=''
             if (( ! after_terminator )); then candidates='-h --help -v --verbose'; fi
             ;;
+        codex)
+            candidates=''
+            if (( COMP_CWORD == 2 )); then
+                if (( ! after_terminator )); then candidates='-h --help enable disable list'; fi
+            else
+                case "${{COMP_WORDS[2]}}" in
+                    enable|disable)
+                        if (( position == 1 )); then
+                            candidates="-h --help -g --global -l --local $(_skillset_names)"
+                        fi
+                        ;;
+                    list)
+                        if (( ! after_terminator )); then candidates='-h --help -v --verbose -g --global -l --local'; fi
+                        ;;
+                esac
+            fi
+            ;;
         completions)
             candidates=''
             if (( ! after_terminator )); then candidates='-h --help'; fi
             if (( position == 0 )); then candidates+=' bash zsh fish'; fi
             ;;
-        init|current|doctor)
+        init|current)
             candidates=''
             if (( ! after_terminator )); then candidates='-h --help'; fi
+            ;;
+        doctor)
+            candidates=''
+            if (( ! after_terminator )); then candidates='-h --help --fix'; fi
             ;;
         skills) return ;;
         *) return ;;
@@ -115,7 +137,8 @@ _skillset_names() {
     local output line
     output="$(command skillset list 2>/dev/null)" || return 0
     while IFS= read -r line; do
-        print -r -- "${line#\* }"
+        line="${line#\* }"
+        print -r -- "${line% \[m\]}"
     done <<< "$output"
 }
 
@@ -138,6 +161,7 @@ _skillset() {
                 'rename:rename a skillset'
                 'remove:remove an inactive skillset'
                 'list:list managed skillsets'
+                'codex:manage Codex-enabled skillsets'
                 'current:print the active skillset name'
                 'show:show skills in a skillset'
                 'doctor:diagnose the managed layout'
@@ -154,7 +178,8 @@ _skillset() {
                 create)
                     _arguments -S \
                         '(-h --help)'{-h,--help}'[show help]' \
-                        '(-f --from)'{-f,--from=}'[clone from an existing skillset]:source skillset:->skillsets' \
+                        '(-f --from --manual)'{-f,--from=}'[clone from an existing skillset]:source skillset:->skillsets' \
+                        '(-f --from --manual)'--manual'[create a hand-managed skillset]' \
                         '--use[activate the created skillset]' \
                         '1:name:' && return 0
                     ;;
@@ -176,8 +201,35 @@ _skillset() {
                         '(-h --help)'{-h,--help}'[show help]' \
                         '(-v --verbose)'{-v,--verbose}'[show skill inventory]' && return 0
                     ;;
-                current|doctor)
+                codex)
+                    if (( CURRENT == 2 )); then
+                        _values 'Codex command' \
+                            'enable:enable a skillset for Codex' \
+                            'disable:disable a skillset for Codex' \
+                            'list:list Codex-enabled skillsets'
+                        return
+                    fi
+                    if [[ "${words[2]}" == enable || "${words[2]}" == disable ]]; then
+                        _arguments -S \
+                            '(-h --help)'{-h,--help}'[show help]' \
+                            '(-g --global -l --local)'{-g,--global}'[manage global Codex skills]' \
+                            '(-g --global -l --local)'{-l,--local}'[manage local Codex skills]' \
+                            '1:name:->skillsets' && return 0
+                    elif [[ "${words[2]}" == list ]]; then
+                        _arguments -S \
+                            '(-h --help)'{-h,--help}'[show help]' \
+                            '(-g --global -l --local)'{-g,--global}'[list global Codex skills]' \
+                            '(-g --global -l --local)'{-l,--local}'[list local Codex skills]' \
+                            '(-v --verbose)'{-v,--verbose}'[show skill inventory]' && return 0
+                    fi
+                    ;;
+                current)
                     _arguments -S '(-h --help)'{-h,--help}'[show help]' && return 0
+                    ;;
+                doctor)
+                    _arguments -S \
+                        '(-h --help)'{-h,--help}'[show help]' \
+                        '--fix[create safe missing replacement files after confirmation]' && return 0
                     ;;
                 show)
                     _arguments -S '(-h --help)'{-h,--help}'[show help]' '1::name:->skillsets' && return 0
@@ -208,7 +260,7 @@ FISH = """function __skillset_names
     set -l list_status $status
     test $list_status -eq 0; or return 0
     test (count $output) -gt 0; or return 0
-    string replace -r '^\\* ' '' $output
+    string replace -r '^\\* ' '' $output | string replace -r ' \\[m\\]$' ''
 end
 
 function __skillset_needs_command
@@ -241,7 +293,7 @@ function __skillset_positional_count
                 set after_options true
             case -f --from
                 set skip true
-            case '--from=*' -h --help --use --yes -v --verbose '-*'
+            case '--from=*' -h --help --manual --use --yes -v --verbose --fix -g --global -l --local '-*'
             case '*'
                 set count (math $count + 1)
         end
@@ -261,22 +313,35 @@ complete -c skillset -n __skillset_needs_command -a use -d 'Activate a skillset'
 complete -c skillset -n __skillset_needs_command -a rename -d 'Rename a skillset'
 complete -c skillset -n __skillset_needs_command -a remove -d 'Remove an inactive skillset'
 complete -c skillset -n __skillset_needs_command -a list -d 'List managed skillsets'
+complete -c skillset -n __skillset_needs_command -a codex -d 'Manage Codex-enabled skillsets'
 complete -c skillset -n __skillset_needs_command -a current -d 'Print the active skillset name'
 complete -c skillset -n __skillset_needs_command -a show -d 'Show skills in a skillset'
 complete -c skillset -n __skillset_needs_command -a doctor -d 'Diagnose the managed layout'
 complete -c skillset -n __skillset_needs_command -a skills -d 'Run managed upstream skills'
 complete -c skillset -n __skillset_needs_command -a completions -d 'Emit a shell completion script'
 
-for subcommand in init create use rename remove list current show doctor completions
+for subcommand in init create use rename remove list codex current show doctor completions
     complete -c skillset -n "__skillset_using_command $subcommand" -s h -l help -d 'Show help'
 end
 complete -c skillset -n '__skillset_using_command create' -s f -l from -x -a '(__skillset_names)' -d 'Clone from a skillset'
+complete -c skillset -n '__skillset_using_command create' -l manual -d 'Create a hand-managed skillset'
 complete -c skillset -n '__skillset_using_command create' -l use -d 'Activate the created skillset'
 complete -c skillset -n '__skillset_using_command use; and __skillset_at_position 0' -a '(__skillset_names)'
 complete -c skillset -n '__skillset_using_command rename; and __skillset_at_position 0' -a '(__skillset_names)'
 complete -c skillset -n '__skillset_using_command remove; and __skillset_at_position 0' -a '(__skillset_names)'
 complete -c skillset -n '__skillset_using_command remove' -l yes -d 'Skip confirmation'
 complete -c skillset -n '__skillset_using_command list' -s v -l verbose -d 'Show skill inventory'
+complete -c skillset -n '__skillset_using_command codex; and __skillset_at_position 0' -a 'enable disable list'
+complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = enable; and __skillset_at_position 1' -a '(__skillset_names)'
+complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = disable; and __skillset_at_position 1' -a '(__skillset_names)'
+complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = enable' -s g -l global -d 'Manage global Codex skills'
+complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = enable' -s l -l local -d 'Manage local Codex skills'
+complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = disable' -s g -l global -d 'Manage global Codex skills'
+complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = disable' -s l -l local -d 'Manage local Codex skills'
+complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = list' -s v -l verbose -d 'Show skill inventory'
+complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = list' -s g -l global -d 'List global Codex skills'
+complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = list' -s l -l local -d 'List local Codex skills'
+complete -c skillset -n '__skillset_using_command doctor' -l fix -d 'Create safe missing replacement files after confirmation'
 complete -c skillset -n '__skillset_using_command show; and __skillset_at_position 0' -a '(__skillset_names)'
 complete -c skillset -n '__skillset_using_command completions; and __skillset_at_position 0' -a 'bash zsh fish'
 """

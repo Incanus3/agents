@@ -1,4 +1,5 @@
-.augment/settings.json
+.augment
+.codex
 
 # br doctor per-run artifacts
 .doctor/
@@ -12,6 +13,6 @@ skillsets/.skillset-create-*.staging
 __pycache__
 
 # active skillset selection
-active
-skills
-.skill-lock.json
+/active
+/skills
+/.skill-lock.json
