@@ -1016,6 +1016,91 @@ _skillset'''
         self.assertEqual(self.filesystem_snapshot(configured), configured_before)
         self.assertEqual(self.filesystem_snapshot(mismatched), mismatched_before)
 
+    def test_doctor_rejects_invalid_config_before_skillsets_descendant_access(self):
+        external = self.sandbox / "invalid-config-doctor-source"
+        default = external / "default"
+        (default / "skills").mkdir(parents=True)
+        self.write_skill(
+            default / "skills",
+            "external-sentinel",
+            "name: external-sentinel\n"
+            "description: metadata beyond an invalid configuration",
+        )
+        self.write_lock(default / ".skill-lock.json")
+        cases = (
+            ("malformed", "{not json\n", "invalid config"),
+            (
+                "wrong-version",
+                json.dumps(
+                    {"version": 2, "skillsets_directory": str(external)}
+                )
+                + "\n",
+                "integer version 1",
+            ),
+        )
+
+        for index, (label, raw_config, expected) in enumerate(cases):
+            with self.subTest(label=label):
+                home = self.new_home(f"invalid-doctor-config-{index}")
+                root = home / ".agents"
+                self.write_config(home, external, raw=raw_config)
+                (root / ".skillset.lock").write_text("", encoding="utf-8")
+                skillsets = root / "skillsets"
+                skillsets.symlink_to(external, target_is_directory=True)
+                (root / "active").symlink_to("skillsets/default")
+                (root / "skills").symlink_to("active/skills")
+                (root / ".skill-lock.json").symlink_to("active/.skill-lock.json")
+
+                descendant_accessed = (
+                    self.sandbox / f"invalid-config-descendant-accessed-{index}"
+                )
+                descendant_prefix = str(skillsets) + os.sep
+                fault = self.fault_environment(
+                    f"""
+                    import os
+                    from pathlib import Path
+                    marker = Path({str(descendant_accessed)!r})
+                    descendant_prefix = {descendant_prefix!r}
+                    original_lstat = os.lstat
+                    original_iterdir = Path.iterdir
+                    def guarded_lstat(path, *args, **kwargs):
+                        candidate = os.fsdecode(os.fspath(path))
+                        if candidate.startswith(descendant_prefix):
+                            marker.write_text(candidate, encoding="utf-8")
+                        return original_lstat(path, *args, **kwargs)
+                    def guarded_iterdir(path, *args, **kwargs):
+                        candidate = os.fsdecode(os.fspath(path))
+                        if candidate == descendant_prefix.rstrip(os.sep):
+                            marker.write_text(candidate, encoding="utf-8")
+                        return original_iterdir(path, *args, **kwargs)
+                    os.lstat = guarded_lstat
+                    Path.iterdir = guarded_iterdir
+                    """
+                )
+                home_before = self.filesystem_snapshot(home)
+                external_before = self.filesystem_snapshot(external)
+
+                result = self.run_cli(
+                    "doctor", home=home, extra_environment=fault
+                )
+
+                self.assert_refused(result)
+                errors = self.doctor_findings(result, "error")
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(expected, errors[0])
+                self.assertNotIn(
+                    "external-sentinel", result.stdout + result.stderr
+                )
+                self.assertNotIn("metadata beyond", result.stdout + result.stderr)
+                self.assertFalse(
+                    descendant_accessed.exists(),
+                    "doctor inspected a descendant with invalid configuration",
+                )
+                self.assertEqual(self.filesystem_snapshot(home), home_before)
+                self.assertEqual(
+                    self.filesystem_snapshot(external), external_before
+                )
+
     def test_doctor_aggregates_uninitialized_state_without_creating_files(self):
         self.root.mkdir()
         (self.root / ".skillset.lock").write_text("", encoding="utf-8")
@@ -2849,6 +2934,28 @@ _skillset'''
         self.assert_refused(collision)
         self.assertEqual(self.tree_contract_snapshot(external), before)
         self.assertFalse(os.path.lexists(other_home / ".agents" / "skillsets"))
+
+    def test_configured_init_rejects_stale_create_staging_without_mutation(self):
+        external = self.sandbox / "stale-staging-skillsets"
+        staging = external / ".skillset-create-foo.staging"
+        staging.mkdir(parents=True)
+        marker = staging / "keep"
+        marker.write_bytes(b"partially created data")
+        self.write_config(self.home, external)
+        (self.root / ".skillset.lock").write_text("", encoding="utf-8")
+        home_before = self.filesystem_snapshot(self.home)
+        external_before = self.filesystem_snapshot(external)
+
+        result = self.run_cli("init", "default")
+
+        self.assert_refused(result)
+        self.assertIn(
+            f"stale create staging path must be recovered: {staging}",
+            result.stdout + result.stderr,
+        )
+        self.assertEqual(self.filesystem_snapshot(self.home), home_before)
+        self.assertEqual(self.filesystem_snapshot(external), external_before)
+        self.assertFalse(os.path.lexists(self.root / "skillsets"))
 
     def test_config_validation_rejects_noncanonical_or_untrusted_sources(self):
         real_source = self.sandbox / "real-config-source"

@@ -6,7 +6,6 @@ import json
 from .errors import OperationalError
 from .layout import (
     NAME_PATTERN,
-    configured_skillsets_directory,
     doctor_operation_lock,
     ensure_manual_sentinel,
     lexists,
@@ -204,52 +203,12 @@ def doctor_set(path, name, errors, warnings):
 
 
 def doctor_skillsets_directory(root, errors):
-    skillsets = root / "skillsets"
     try:
-        configured = configured_skillsets_directory(root)
+        validate_skillsets_directory(root)
     except OperationalError as error:
         errors.append(str(error))
         return False
-    try:
-        skillsets_mode = skillsets.lstat().st_mode
-    except FileNotFoundError:
-        if configured is None:
-            errors.append(f"skillsets directory is missing: {skillsets}")
-        else:
-            errors.append(
-                f"configured skillsets link is missing: {skillsets} -> {configured}"
-            )
-    except OSError as error:
-        errors.append(f"could not inspect skillsets directory {skillsets}: {error}")
-    else:
-        if configured is not None:
-            if not stat.S_ISLNK(skillsets_mode):
-                errors.append(
-                    f"configured skillsets link must be a symlink: "
-                    f"{skillsets} -> {configured}"
-                )
-                return False
-            try:
-                target = os.readlink(skillsets)
-            except OSError as error:
-                errors.append(
-                    f"could not read configured skillsets link {skillsets}: {error}"
-                )
-                return False
-            if target != os.fspath(configured):
-                errors.append(
-                    f"configured skillsets link is noncanonical: {skillsets} -> "
-                    f"{target}; expected {configured}"
-                )
-                return False
-            return True
-        elif stat.S_ISLNK(skillsets_mode):
-            errors.append(f"skillsets directory symlink is not allowed: {skillsets}")
-        elif not stat.S_ISDIR(skillsets_mode):
-            errors.append(f"skillsets must be a real directory: {skillsets}")
-        else:
-            return True
-    return False
+    return True
 
 
 def doctor_active_alias(active, skillsets, skillsets_valid, errors):

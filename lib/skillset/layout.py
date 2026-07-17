@@ -90,14 +90,34 @@ def validate_skillsets_directory(root):
     skillsets = root / "skillsets"
     configured = configured_skillsets_directory(root)
     if configured is None:
-        if not real_kind(skillsets, stat.S_ISDIR):
-            raise OperationalError("skillsets are not initialized")
+        try:
+            mode = skillsets.lstat().st_mode
+        except FileNotFoundError as error:
+            raise OperationalError(
+                f"skillsets directory is missing: {skillsets}"
+            ) from error
+        except OSError as error:
+            raise OperationalError(
+                f"could not inspect skillsets directory {skillsets}: {error}"
+            ) from error
+        if stat.S_ISLNK(mode):
+            raise OperationalError(
+                f"skillsets directory symlink is not allowed: {skillsets}"
+            )
+        if not stat.S_ISDIR(mode):
+            raise OperationalError(
+                f"skillsets must be a real directory: {skillsets}"
+            )
         return skillsets
     try:
         mode = skillsets.lstat().st_mode
+    except FileNotFoundError as error:
+        raise OperationalError(
+            f"configured skillsets link is missing: {skillsets} -> {configured}"
+        ) from error
     except OSError as error:
         raise OperationalError(
-            f"configured skillsets link is missing or invalid: {skillsets}: {error}"
+            f"could not inspect skillsets directory {skillsets}: {error}"
         ) from error
     if not stat.S_ISLNK(mode):
         raise OperationalError(
