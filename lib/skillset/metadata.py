@@ -5,7 +5,13 @@ import stat
 import sys
 import unicodedata
 
-from .layout import set_mode, set_path, validate_layout, validate_set
+from .layout import (
+    set_mode,
+    set_path,
+    validate_layout,
+    validate_set,
+    validate_skillsets_directory,
+)
 
 
 TARGET_FIELD_PATTERN = re.compile(r"(name|description):[ \t]*(.*)\Z")
@@ -383,7 +389,8 @@ def list_scoped_sets(root, scoped_names, verbose, output=None):
 
 
 def list_sets(root, verbose, output=None):
-    names = sorted(entry.name for entry in (root / "skillsets").iterdir())
+    skillsets = validate_skillsets_directory(root)
+    names = sorted(entry.name for entry in skillsets.iterdir())
     return list_named_sets(root, names, verbose, output)
 
 

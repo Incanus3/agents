@@ -82,11 +82,22 @@ def configured_skillsets_directory(root):
         raise OperationalError(
             f"configured skillsets directory must be an existing real directory: {source}"
         )
+    try:
+        resolved_source = source.resolve(strict=True)
+        resolved_root = managed_root.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise OperationalError(
+            f"could not resolve configured skillsets directory {source}: {error}"
+        ) from error
+    if resolved_source == resolved_root or resolved_root in resolved_source.parents:
+        raise OperationalError(
+            f"configured skillsets directory must resolve outside the managed root: {source}"
+        )
     return source
 
 
 def validate_skillsets_directory(root):
-    """Validate the internal container or the exact external-source link."""
+    """Validate the managed container and return its real storage directory."""
     skillsets = root / "skillsets"
     configured = configured_skillsets_directory(root)
     if configured is None:
@@ -134,13 +145,14 @@ def validate_skillsets_directory(root):
             f"configured skillsets link is noncanonical: {skillsets} -> {target}; "
             f"expected {configured}"
         )
-    return skillsets
+    return configured
 
 
 def set_path(root, name):
     validate_name(name)
-    path = root / "skillsets" / name
-    if path.parent != root / "skillsets":
+    skillsets = validate_skillsets_directory(root)
+    path = skillsets / name
+    if path.parent != skillsets:
         raise OperationalError(f"unsafe skillset path for {name!r}")
     return path
 

@@ -2891,6 +2891,9 @@ _skillset'''
         activated = self.run_cli("use", "experiment")
         renamed = self.run_cli("rename", "default", "baseline")
         removed = self.run_cli("remove", "baseline", "--yes")
+        codex_enabled = self.run_cli("codex", "enable", "experiment")
+        codex_listed = self.run_cli("codex", "list")
+        codex_disabled = self.run_cli("codex", "disable", "experiment")
         inspected = self.run_cli("doctor")
 
         self.assertEqual(initialized.returncode, 0, initialized.stderr)
@@ -2898,6 +2901,9 @@ _skillset'''
         self.assertEqual(activated.returncode, 0, activated.stderr)
         self.assertEqual(renamed.returncode, 0, renamed.stderr)
         self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertEqual(codex_enabled.returncode, 0, codex_enabled.stderr)
+        self.assertEqual(codex_listed.stdout, "[g] experiment\n")
+        self.assertEqual(codex_disabled.returncode, 0, codex_disabled.stderr)
         self.assertEqual(inspected.returncode, 0, inspected.stderr)
         self.assertTrue((self.root / "skillsets").is_symlink())
         self.assertEqual(os.readlink(self.root / "skillsets"), str(external))
@@ -2908,6 +2914,9 @@ _skillset'''
         self.assertFalse(os.path.lexists(external / "default"))
         self.assertFalse(os.path.lexists(external / "baseline"))
         self.assertTrue((external / "experiment").is_dir())
+        self.assertFalse(
+            os.path.lexists(self.home / ".codex" / "skills" / "experiment")
+        )
 
     def test_configured_init_accepts_other_valid_sets_and_refuses_name_collision(self):
         external = self.sandbox / "shared-skillsets"
@@ -2934,6 +2943,133 @@ _skillset'''
         self.assert_refused(collision)
         self.assertEqual(self.tree_contract_snapshot(external), before)
         self.assertFalse(os.path.lexists(other_home / ".agents" / "skillsets"))
+
+    def test_configured_remove_refuses_a_replaced_managed_link_after_confirmation(self):
+        external = self.sandbox / "configured-remove-source"
+        victim = self.sandbox / "configured-remove-victim"
+        external.mkdir()
+        victim.mkdir()
+        self.write_config(self.home, external)
+        self.assertEqual(self.run_cli("init", "default").returncode, 0)
+        self.assertEqual(self.run_cli("create", "doomed").returncode, 0)
+
+        victim_root = self.sandbox / "configured-remove-victim-view"
+        victim_root.mkdir()
+        (victim_root / "skillsets").symlink_to(victim, target_is_directory=True)
+        victim_set = self.make_set(victim_root, "doomed")
+        payload = victim_set / "skills" / "keep"
+        payload.write_bytes(b"victim data")
+        link = self.root / "skillsets"
+        fault = self.fault_environment(
+            f"""
+            import os
+            import sys
+            from pathlib import Path
+            original_stdin = sys.stdin
+            link = Path({str(link)!r})
+            victim = {str(victim)!r}
+            class SwappingStdin:
+                def readline(self, *args, **kwargs):
+                    link.unlink()
+                    os.symlink(victim, link)
+                    return "yes\\n"
+                def __getattr__(self, name):
+                    return getattr(original_stdin, name)
+            sys.stdin = SwappingStdin()
+            """
+        )
+
+        result = self.run_cli("remove", "doomed", extra_environment=fault)
+
+        self.assert_refused(result)
+        self.assertIn(
+            "configured skillsets link is noncanonical",
+            result.stdout + result.stderr,
+        )
+        self.assertTrue((external / "doomed").is_dir())
+        self.assertEqual(payload.read_bytes(), b"victim data")
+        self.assertEqual(os.readlink(link), str(victim))
+
+    def test_configured_init_preserves_a_set_created_after_preflight(self):
+        external = self.sandbox / "configured-init-race"
+        external.mkdir()
+        self.write_config(self.home, external)
+        target = external / "default"
+        payload = target / "skills" / "keep"
+        fault = self.fault_environment(
+            f"""
+            import json
+            from pathlib import Path
+            target = Path({str(target)!r})
+            original_mkdir = Path.mkdir
+            injected = False
+            def create_collision(path, *args, **kwargs):
+                global injected
+                if path == target and not injected:
+                    injected = True
+                    original_mkdir(target)
+                    original_mkdir(target / "skills")
+                    (target / "skills" / "keep").write_bytes(b"concurrent data")
+                    (target / ".skill-lock.json").write_text(
+                        json.dumps({EMPTY_LOCK!r}) + "\\n",
+                        encoding="utf-8",
+                    )
+                return original_mkdir(path, *args, **kwargs)
+            Path.mkdir = create_collision
+            """
+        )
+
+        result = self.run_cli("init", "default", extra_environment=fault)
+
+        self.assert_refused(result)
+        self.assertIn("File exists", result.stdout + result.stderr)
+        self.assertEqual(payload.read_bytes(), b"concurrent data")
+        self.assertEqual(
+            json.loads((target / ".skill-lock.json").read_text(encoding="utf-8")),
+            EMPTY_LOCK,
+        )
+        self.assertFalse(os.path.lexists(self.root / "skillsets"))
+
+    def test_configured_init_preserves_a_link_and_set_created_after_preflight(self):
+        external = self.sandbox / "configured-init-link-race"
+        external.mkdir()
+        self.write_config(self.home, external)
+        link = self.root / "skillsets"
+        target = external / "default"
+        payload = target / "skills" / "keep"
+        fault = self.fault_environment(
+            f"""
+            import json
+            import os
+            from pathlib import Path
+            link = Path({str(link)!r})
+            external = {str(external)!r}
+            target = Path({str(target)!r})
+            original_symlink = os.symlink
+            injected = False
+            def create_collision(source, destination, *args, **kwargs):
+                global injected
+                if Path(destination) == link and not injected:
+                    injected = True
+                    original_symlink(external, link)
+                    target.mkdir()
+                    (target / "skills").mkdir()
+                    (target / "skills" / "keep").write_bytes(b"concurrent data")
+                    (target / ".skill-lock.json").write_text(
+                        json.dumps({EMPTY_LOCK!r}) + "\\n",
+                        encoding="utf-8",
+                    )
+                return original_symlink(source, destination, *args, **kwargs)
+            os.symlink = create_collision
+            """
+        )
+
+        result = self.run_cli("init", "default", extra_environment=fault)
+
+        self.assert_refused(result)
+        self.assertIn("File exists", result.stdout + result.stderr)
+        self.assertEqual(payload.read_bytes(), b"concurrent data")
+        self.assertEqual(os.readlink(link), str(external))
 
     def test_configured_init_rejects_stale_create_staging_without_mutation(self):
         external = self.sandbox / "stale-staging-skillsets"
@@ -3057,6 +3193,25 @@ _skillset'''
         )
         self.assertFalse(os.path.lexists(nested_home / ".agents" / "skillsets"))
 
+        linked_parent_home = self.new_home("linked-parent-config-source")
+        linked_parent_root = linked_parent_home / ".agents"
+        nested_source = linked_parent_root / "external"
+        nested_source.mkdir(parents=True)
+        root_alias = self.sandbox / "managed-root-alias"
+        root_alias.symlink_to(linked_parent_root, target_is_directory=True)
+        linked_source = root_alias / "external"
+        self.write_config(linked_parent_home, linked_source)
+
+        result = self.run_cli("init", "default", home=linked_parent_home)
+
+        self.assert_refused(result)
+        self.assertIn(
+            "configured skillsets directory must resolve outside the managed root",
+            result.stdout + result.stderr,
+        )
+        self.assertFalse(os.path.lexists(linked_parent_root / "skillsets"))
+        self.assertFalse(os.path.lexists(nested_source / "default"))
+
     def test_configured_init_rolls_back_owned_link_and_set_after_interruptions(self):
         for index, failure_point in enumerate(("skillsets-link", "initial-set")):
             with self.subTest(failure_point=failure_point):
@@ -3094,7 +3249,7 @@ _skillset'''
                         f"""
                         import os
                         from pathlib import Path
-                        destination = {str(root / 'skillsets' / 'default')!r}
+                        destination = {str(external / 'default')!r}
                         original_mkdir = Path.mkdir
                         def interrupt_after_set(path, *args, **kwargs):
                             result = original_mkdir(path, *args, **kwargs)
@@ -3121,6 +3276,45 @@ _skillset'''
                 self.assertFalse(os.path.lexists(external / "default"))
                 self.assertEqual(marker.read_bytes(), b"preserve")
                 self.assertTrue(external.is_dir())
+
+    def test_configured_init_rollback_never_traverses_a_replaced_link(self):
+        external = self.sandbox / "rollback-replaced-link-source"
+        victim = self.sandbox / "rollback-replaced-link-victim"
+        external.mkdir()
+        victim.mkdir()
+        victim_root = self.sandbox / "rollback-replaced-link-victim-view"
+        victim_root.mkdir()
+        (victim_root / "skillsets").symlink_to(victim, target_is_directory=True)
+        victim_set = self.make_set(victim_root, "default")
+        payload = victim_set / "skills" / "keep"
+        payload.write_bytes(b"victim data")
+        self.write_config(self.home, external)
+        link = self.root / "skillsets"
+        fault = self.fault_environment(
+            f"""
+            import os
+            from pathlib import Path
+            link = Path({str(link)!r})
+            victim = {str(victim)!r}
+            original_symlink = os.symlink
+            def replace_after_link(source, target, *args, **kwargs):
+                result = original_symlink(source, target, *args, **kwargs)
+                if Path(target) == link:
+                    link.unlink()
+                    original_symlink(victim, link)
+                    raise KeyboardInterrupt
+                return result
+            os.symlink = replace_after_link
+            """
+        )
+
+        result = self.run_cli("init", "default", extra_environment=fault)
+
+        self.assert_refused(result)
+        self.assertIn("rollback was incomplete", result.stdout + result.stderr)
+        self.assertEqual(payload.read_bytes(), b"victim data")
+        self.assertFalse(os.path.lexists(external / "default"))
+        self.assertEqual(os.readlink(link), str(victim))
 
     def test_init_adopts_existing_skills_and_version_three_lock_without_rewriting(self):
         source_skills = self.root / "skills"

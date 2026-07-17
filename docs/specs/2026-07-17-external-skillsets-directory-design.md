@@ -55,9 +55,11 @@ The file must:
 - point outside the managed `~/.agents` root;
 - point to an existing real directory, never a symlink.
 
-The configured path is normalized without resolving symlinks. The serialized
-path and the `~/.agents/skillsets` link target must both equal that normalized
-absolute path.
+The configured path is normalized without substituting a resolved path into
+the configuration or managed link. The serialized path and the
+`~/.agents/skillsets` link target must both equal that normalized absolute
+path. Resolution is additionally used as a containment check: the source's
+resolved location must remain outside the resolved managed root.
 
 Unknown keys, relative paths, malformed JSON, unsupported versions, missing
 targets, and symlink targets are errors.

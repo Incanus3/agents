@@ -204,11 +204,10 @@ def doctor_set(path, name, errors, warnings):
 
 def doctor_skillsets_directory(root, errors):
     try:
-        validate_skillsets_directory(root)
+        return validate_skillsets_directory(root)
     except OperationalError as error:
         errors.append(str(error))
-        return False
-    return True
+        return None
 
 
 def doctor_active_alias(active, skillsets, skillsets_valid, errors):
@@ -377,8 +376,10 @@ def recover_staged_use(root):
 
 
 def doctor_inspection(root, errors, warnings):
-    skillsets = root / "skillsets"
-    skillsets_valid = doctor_skillsets_directory(root, errors)
+    skillsets = doctor_skillsets_directory(root, errors)
+    skillsets_valid = skillsets is not None
+    if skillsets is None:
+        skillsets = root / "skillsets"
 
     doctor_alias(root / "skills", "active/skills", errors)
     active_name = doctor_active_alias(root / "active", skillsets, skillsets_valid, errors)

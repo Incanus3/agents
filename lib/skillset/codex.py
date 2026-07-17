@@ -18,7 +18,8 @@ from .metadata import list_named_sets, list_scoped_sets
 
 
 def expected_target(root, name):
-    return os.fspath((set_path(root, name) / "skills").absolute())
+    validate_name(name)
+    return os.fspath((root / "skillsets" / name / "skills").absolute())
 
 
 def codex_skills_directory(root, scope, create):
