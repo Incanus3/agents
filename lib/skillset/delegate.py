@@ -2,7 +2,7 @@ import os
 import sys
 
 from .errors import OperationalError
-from .layout import validate_layout
+from .layout import set_mode, validate_layout
 
 
 SCOPED_SKILLS_COMMANDS = {"add", "list", "ls", "remove", "rm", "update"}
@@ -42,7 +42,15 @@ def prepare_upstream_arguments(arguments, command_parser):
 
 
 def delegate_skills(root, arguments, home_lock, lock_file, command_parser):
-    validate_layout(root)
+    active_name = validate_layout(root)
+    if (
+        set_mode(root, active_name) == "manual"
+        and arguments
+        and arguments[0] in SCOPED_SKILLS_COMMANDS
+    ):
+        raise OperationalError(
+            "the active skillset is manually managed; maintain it by editing its files"
+        )
     upstream_arguments = prepare_upstream_arguments(arguments, command_parser)
 
     child_environment = os.environ.copy()

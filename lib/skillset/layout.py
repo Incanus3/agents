@@ -10,6 +10,10 @@ from .errors import OperationalError
 
 EMPTY_LOCK = {"version": 3, "skills": {}, "dismissed": {}}
 NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
+MANUAL_MARKER = ".skillset-manual"
+MANUAL_SENTINEL_NAME = ".skillset-manual-empty-lock.json"
+MANUAL_SENTINEL = f"../{MANUAL_SENTINEL_NAME}"
+USE_STAGING = ".skillset-use.staging"
 
 
 def lexists(path):
@@ -65,14 +69,75 @@ def validate_lockfile(path):
     read_lockfile(path)
 
 
-def validate_set(root, name):
+def validate_manual_marker(path):
+    if not real_kind(path, stat.S_ISREG):
+        raise OperationalError(f"manual marker must be a real empty regular file: {path}")
+    try:
+        if path.stat().st_size != 0:
+            raise OperationalError(f"manual marker must be empty: {path}")
+    except OSError as error:
+        raise OperationalError(f"could not inspect manual marker {path}: {error}") from error
+
+
+def set_mode(root, name):
+    """Validate a set and return its explicit management mode."""
     path = set_path(root, name)
     if not real_kind(path, stat.S_ISDIR):
         raise OperationalError(f"skillset must be a real directory: {path}")
     skills = path / "skills"
     if not real_kind(skills, stat.S_ISDIR):
         raise OperationalError(f"skills must be a real directory: {skills}")
-    validate_lockfile(path / ".skill-lock.json")
+    marker = path / MANUAL_MARKER
+    lockfile = path / ".skill-lock.json"
+    if lexists(marker):
+        validate_manual_marker(marker)
+        if lexists(lockfile):
+            raise OperationalError(
+                f"manual skillset must not contain a lockfile: {lockfile}"
+            )
+        return "manual"
+    validate_lockfile(lockfile)
+    return "managed"
+
+
+def validate_set(root, name):
+    set_mode(root, name)
+    return set_path(root, name)
+
+
+def manual_sentinel_path(root):
+    return root.parent / MANUAL_SENTINEL_NAME
+
+
+def validate_manual_sentinel(root):
+    path = manual_sentinel_path(root)
+    if not real_kind(path, stat.S_ISREG):
+        raise OperationalError(f"manual empty-lock sentinel must be a real regular file: {path}")
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError as error:
+        raise OperationalError(f"could not inspect manual empty-lock sentinel {path}: {error}") from error
+    if mode != 0o444:
+        raise OperationalError(f"manual empty-lock sentinel must be read-only (0444): {path}")
+    value = read_lockfile(path)
+    if value != EMPTY_LOCK:
+        raise OperationalError(f"manual empty-lock sentinel is not canonical: {path}")
+    return path
+
+
+def ensure_manual_sentinel(root):
+    path = manual_sentinel_path(root)
+    if lexists(path):
+        validate_manual_sentinel(root)
+        return path
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            json.dump(EMPTY_LOCK, handle)
+            handle.write("\n")
+        path.chmod(0o444)
+    except OSError as error:
+        raise OperationalError(f"could not create manual empty-lock sentinel {path}: {error}") from error
+    validate_manual_sentinel(root)
     return path
 
 
@@ -99,22 +164,30 @@ def validate_active_set(root):
     validate_name(active_name)
     if target != f"skillsets/{active_name}":
         raise OperationalError(f"active alias has a noncanonical target: {target}")
-    validate_set(root, active_name)
+    set_mode(root, active_name)
     return active_name
 
 
-def validate_layout(root):
+def validate_layout(root, repair_missing_manual_sentinel=False):
     skillsets = root / "skillsets"
     if not real_kind(skillsets, stat.S_ISDIR):
         raise OperationalError("skillsets are not initialized")
-    use_staging = root / ".skillset-use.staging"
+    use_staging = root / USE_STAGING
     if lexists(use_staging):
         raise OperationalError(
             f"stale active staging path must be recovered: {use_staging}"
         )
     require_alias(root / "skills", "active/skills")
-    require_alias(root / ".skill-lock.json", "active/.skill-lock.json")
     active_name = validate_active_set(root)
+    active_mode = set_mode(root, active_name)
+    if active_mode == "manual":
+        if repair_missing_manual_sentinel and not lexists(manual_sentinel_path(root)):
+            ensure_manual_sentinel(root)
+        else:
+            validate_manual_sentinel(root)
+        require_alias(root / ".skill-lock.json", MANUAL_SENTINEL)
+    else:
+        require_alias(root / ".skill-lock.json", "active/.skill-lock.json")
     for entry in skillsets.iterdir():
         if entry.name.startswith(".skillset-create-") and entry.name.endswith(
             ".staging"

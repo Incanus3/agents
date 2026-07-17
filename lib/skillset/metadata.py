@@ -5,10 +5,11 @@ import stat
 import sys
 import unicodedata
 
-from .layout import set_path, validate_layout, validate_set
+from .layout import set_mode, set_path, validate_layout, validate_set
 
 
 TARGET_FIELD_PATTERN = re.compile(r"(name|description):[ \t]*(.*)\Z")
+BLOCK_SCALAR_MARKERS = {"|", ">", "|-", "|+", ">-", ">+"}
 
 
 def normalize_scalar(value):
@@ -118,7 +119,7 @@ def collect_target_fields(lines):
                 break
             continuation.append(line)
             index += 1
-        if raw in ("|", ">"):
+        if raw in BLOCK_SCALAR_MARKERS:
             fields[field].append(("block", "\n".join(continuation)))
         else:
             fields[field].append(("inline", "\n".join([raw, *continuation])))
@@ -246,7 +247,9 @@ def verbose_list_rows(root, names, active_name):
         (
             name == active_name,
             printable_text(name),
+            set_mode(root, name) == "manual",
             verbose_skill_entries(set_path(root, name) / "skills"),
+            None,
         )
         for name in names
     ]
@@ -273,10 +276,21 @@ def verbose_list_column_widths(rows):
         ", ".join(skill_entry_text(entry) for entry in entries)
         if entries
         else "(no skills)"
-        for _active, _name, entries in rows
+        for _active, _name, _manual, entries, _scope_label in rows
     ]
-    left_width = max(display_width("SKILLSET"), *(display_width(row[1]) for row in rows))
-    right_width = max(display_width("SKILLS"), *(display_width(cell) for cell in skill_cells))
+    left_width = max(
+        [
+            display_width("SKILLSET"),
+            *(display_width(
+                (f"[{scope_label}] {name}" if scope_label is not None else name)
+                + (" [m]" if manual else "")
+            )
+              for _active, name, manual, _entries, scope_label in rows),
+        ]
+    )
+    right_width = max(
+        [display_width("SKILLS"), *(display_width(cell) for cell in skill_cells)]
+    )
     return left_width, right_width
 
 
@@ -292,30 +306,85 @@ def render_verbose_list(rows, output):
     if width is not None:
         separator = separator[:width]
     print(styled(separator, DIM, colored), file=output)
-    for active, name, entries in rows:
+    for active, name, manual, entries, scope_label in rows:
+        displayed_name = f"[{scope_label}] {name}" if scope_label is not None else name
         if active:
             marker = styled("*", BOLD + CYAN, colored) + " "
             left_cell = styled(name, BOLD + CYAN, colored)
         else:
             marker = "  "
-            left_cell = name
-        left_cell += " " * (left_width - display_width(name))
+            if scope_label is None:
+                left_cell = name
+            else:
+                scope_color = CYAN if scope_label == "g" else GREEN
+                left_cell = (
+                    styled(f"[{scope_label}]", scope_color, colored) + " " + name
+                )
+        if manual:
+            left_cell += " " + styled("[m]", YELLOW, colored)
+        displayed_name += " [m]" if manual else ""
+        left_cell += " " * (left_width - display_width(displayed_name))
         print(
             f"{marker}{left_cell} {divider} {render_skill_entries(entries, colored)}",
             file=output,
         )
 
 
-def list_sets(root, verbose, output=None):
+def list_named_sets(
+    root, names, verbose, output=None, mark_active=True
+):
     output = sys.stdout if output is None else output
-    active_name = validate_layout(root)
-    names = sorted(entry.name for entry in (root / "skillsets").iterdir())
+    active_name = validate_layout(root) if mark_active else None
     if not verbose:
+        colored = color_enabled(output)
         for name in names:
-            marker = "* " if name == active_name else ""
-            print(f"{marker}{name}", file=output)
+            if name == active_name and colored:
+                marker = styled("*", BOLD + CYAN, True) + " "
+                displayed_name = styled(name, BOLD + CYAN, True)
+            else:
+                marker = "* " if name == active_name else ""
+                displayed_name = name
+            suffix = " [m]" if set_mode(root, name) == "manual" else ""
+            if suffix and colored:
+                suffix = " " + styled("[m]", YELLOW, True)
+            print(f"{marker}{displayed_name}{suffix}", file=output)
         return
-    render_verbose_list(verbose_list_rows(root, names, active_name), output)
+    render_verbose_list(
+        verbose_list_rows(root, names, active_name), output
+    )
+
+
+def list_scoped_sets(root, scoped_names, verbose, output=None):
+    output = sys.stdout if output is None else output
+    validate_layout(root)
+    rows = []
+    for scope_label, names in scoped_names:
+        for name in sorted(names):
+            rows.append(
+                (
+                    False,
+                    printable_text(name),
+                    set_mode(root, name) == "manual",
+                    verbose_skill_entries(set_path(root, name) / "skills"),
+                    scope_label,
+                )
+            )
+    if verbose:
+        render_verbose_list(rows, output)
+        return
+    colored = color_enabled(output)
+    for _active, name, manual, _entries, scope_label in rows:
+        scope_color = CYAN if scope_label == "g" else GREEN
+        scope = styled(f"[{scope_label}]", scope_color, colored)
+        suffix = " [m]" if manual else ""
+        if suffix and colored:
+            suffix = " " + styled("[m]", YELLOW, True)
+        print(f"{scope} {name}{suffix}", file=output)
+
+
+def list_sets(root, verbose, output=None):
+    names = sorted(entry.name for entry in (root / "skillsets").iterdir())
+    return list_named_sets(root, names, verbose, output)
 
 
 def current(root):
@@ -328,6 +397,7 @@ DIM = "\x1b[2m"
 CYAN = "\x1b[36m"
 YELLOW = "\x1b[33m"
 RED = "\x1b[31m"
+GREEN = "\x1b[32m"
 
 
 def display_width(value):
@@ -414,7 +484,10 @@ def show(root, name, output=None):
     output = sys.stdout if output is None else output
     active_name = validate_layout(root)
     selected_name = active_name if name is None else name
+    selected_mode = set_mode(root, selected_name)
     skills = validate_set(root, selected_name) / "skills"
+    if selected_mode == "manual":
+        print("Manual skillset [m]: no upstream lock metadata.", file=output)
     render_show(show_skill_rows(skills), output)
 
 

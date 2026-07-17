@@ -2,13 +2,20 @@ import os
 import shutil
 import stat
 import sys
+import json
 
+from .codex import canonical_link
 from .errors import OperationalError
 from .layout import (
     canonical_alias,
+    ensure_manual_sentinel,
     lexists,
+    MANUAL_MARKER,
+    MANUAL_SENTINEL,
     real_kind,
     set_path,
+    set_mode,
+    USE_STAGING,
     validate_layout,
     validate_lockfile,
     validate_name,
@@ -131,10 +138,13 @@ def init(root, name):
         raise OperationalError(f"initialization failed and was rolled back: {error}") from error
 
 
-def populate_staged_set(staging, source_path):
+def populate_staged_set(staging, source_path, manual):
     if source_path is None:
         (staging / "skills").mkdir()
-        write_empty_lock(staging / ".skill-lock.json")
+        if manual:
+            (staging / MANUAL_MARKER).touch()
+        else:
+            write_empty_lock(staging / ".skill-lock.json")
         return
     shutil.copytree(
         source_path / "skills",
@@ -142,10 +152,13 @@ def populate_staged_set(staging, source_path):
         symlinks=True,
         copy_function=shutil.copy2,
     )
-    shutil.copy2(source_path / ".skill-lock.json", staging / ".skill-lock.json")
+    if manual:
+        shutil.copy2(source_path / MANUAL_MARKER, staging / MANUAL_MARKER)
+    else:
+        shutil.copy2(source_path / ".skill-lock.json", staging / ".skill-lock.json")
 
 
-def create(root, name, source):
+def create(root, name, source, manual=False):
     validate_name(name)
     if source is not None:
         validate_name(source)
@@ -157,9 +170,11 @@ def create(root, name, source):
     if lexists(staging):
         raise OperationalError(f"stale create staging path must be recovered: {staging}")
     source_path = validate_set(root, source) if source is not None else None
+    if source_path is not None:
+        manual = set_mode(root, source) == "manual"
     try:
         staging.mkdir()
-        populate_staged_set(staging, source_path)
+        populate_staged_set(staging, source_path, manual)
         if lexists(destination):
             raise OperationalError(f"skillset appeared during creation: {destination}")
         os.rename(staging, destination)
@@ -171,24 +186,72 @@ def create(root, name, source):
         ) from error
 
 
+def use_record(old_active, old_lock, new_active, new_lock):
+    return {
+        "version": 1,
+        "old": {"active": old_active, "lock": old_lock},
+        "new": {"active": new_active, "lock": new_lock},
+    }
+
+
+def write_use_staging(path, record):
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            json.dump(record, handle, separators=(",", ":"), sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as error:
+        raise OperationalError(f"could not record activation intent at {path}: {error}") from error
+
+
+def replace_alias(root, name, target):
+    destination = root / name
+    temporary = root / f".{name.lstrip('.')}.skillset-use-link.staging"
+    try:
+        os.symlink(target, temporary)
+        os.replace(temporary, destination)
+    finally:
+        if lexists(temporary):
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
 def use(root, name):
     validate_name(name)
-    validate_layout(root)
+    old_name = validate_layout(root, repair_missing_manual_sentinel=True)
     validate_set(root, name)
+    target_mode = set_mode(root, name)
+    old_mode = set_mode(root, old_name)
     active = root / "active"
-    staging = root / ".skillset-use.staging"
+    staging = root / USE_STAGING
     if lexists(staging):
         raise OperationalError(f"stale use staging path must be recovered: {staging}")
+    old_active = f"skillsets/{old_name}"
+    old_lock = MANUAL_SENTINEL if old_mode == "manual" else "active/.skill-lock.json"
+    new_active = f"skillsets/{name}"
+    new_lock = MANUAL_SENTINEL if target_mode == "manual" else "active/.skill-lock.json"
+    if old_active == new_active and old_lock == new_lock:
+        return
+    if target_mode == "manual":
+        ensure_manual_sentinel(root)
+    record = use_record(old_active, old_lock, new_active, new_lock)
     try:
-        os.symlink(f"skillsets/{name}", staging)
-        os.replace(staging, active)
+        write_use_staging(staging, record)
+        replace_alias(root, "active", new_active)
+        if old_lock != new_lock:
+            replace_alias(root, ".skill-lock.json", new_lock)
+        if not canonical_alias(active, new_active) or not canonical_alias(
+            root / ".skill-lock.json", new_lock
+        ):
+            raise OperationalError("activation aliases did not reach their intended targets")
+        staging.unlink()
     except Exception as error:
-        try:
-            if lexists(staging):
-                staging.unlink()
-        except OSError:
-            pass
-        raise OperationalError(f"could not activate {name!r}: {error}") from error
+        raise OperationalError(
+            f"could not activate {name!r}; recovery is required with `skillset doctor --fix`: {error}"
+        ) from error
 
 
 def cleanup_rename_staging(staging, target):
@@ -321,6 +384,10 @@ def rename(root, old_name, new_name):
     new = set_path(root, new_name)
     if lexists(new):
         raise OperationalError(f"skillset already exists: {new}")
+    if canonical_link(root, old_name):
+        raise OperationalError(
+            f"cannot rename Codex-enabled skillset {old_name!r}; disable it first"
+        )
 
     if old_name != active_name:
         rename_inactive_set(old, new, old_name, new_name)
@@ -347,6 +414,10 @@ def remove(root, name, confirmed):
     if name == active_name:
         raise OperationalError(
             f"cannot remove active skillset {name!r}; activate another set first"
+        )
+    if canonical_link(root, name):
+        raise OperationalError(
+            f"cannot remove Codex-enabled skillset {name!r}; disable it first"
         )
     if not confirmed:
         confirm_removal(name)

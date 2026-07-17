@@ -2,8 +2,9 @@
 
 `skillset` manages multiple named global agent skill collections under
 `~/.agents/skillsets` and activates one collection through stable relative
-symlinks. The Linux-only CLI provides lifecycle, inspection, and diagnostic
-commands plus managed delegation to the upstream `skills` CLI.
+symlinks. Collections can be upstream-managed or explicitly hand-managed. The
+Linux-only CLI provides lifecycle, inspection, and diagnostic commands plus
+managed delegation to the upstream `skills` CLI.
 
 ## Requirements and PATH
 
@@ -76,6 +77,16 @@ Create an empty inactive set:
 skillset create experiment
 ```
 
+Create a hand-managed collection without upstream lock metadata:
+
+```sh
+skillset create --manual personal
+```
+
+Manual collections contain a real `skills/` directory and an empty
+`.skillset-manual` marker, but never a local `.skill-lock.json`. Cloning a
+collection preserves its mode. `--manual` and `--from` cannot be combined.
+
 Or clone both the complete skills tree and lock metadata from another set:
 
 ```sh
@@ -107,8 +118,15 @@ with a letter or digit.
 skillset use experiment
 ```
 
-Activation atomically retargets `~/.agents/active`; the stable `skills` and
-`.skill-lock.json` aliases remain unchanged.
+Activation atomically retargets `~/.agents/active`. Managed collections keep
+the root lock alias pointed at `active/.skill-lock.json`; a manual collection
+instead uses the read-only shared empty-lock sentinel
+`~/.skillset-manual-empty-lock.json`. Keeping this runtime-owned file outside
+the skillset repository prevents version-control tools from trying to rewrite
+it during commits. `skillset use` recreates it when needed; `skillset doctor
+--fix` can also restore a missing sentinel after confirmation. An interrupted activation leaves
+a verified intent record in place and is completed only after confirmation via
+`skillset doctor --fix`.
 
 ## Install and maintain skills
 
@@ -120,6 +138,11 @@ skillset skills list
 skillset skills remove SKILL
 skillset skills update
 ```
+
+While a manual collection is active, lock-aware upstream commands (`add`,
+`list`, `remove`, and `update`, including their aliases) are refused before
+`npx` starts. Maintain those skills by editing their files directly. Scope-free
+upstream commands such as `find` and `use` remain available.
 
 For `add`, `list`/`ls`, `remove`/`rm`, and `update`, the wrapper injects
 `--global` unless exact `-g` or `--global` is already present before an option
@@ -162,6 +185,14 @@ $ skillset list
 experiment
 ```
 
+Hand-managed sets are annotated with `[m]` (yellow on a color-enabled TTY):
+
+```text
+$ skillset list
+* default
+personal [m]
+```
+
 Verbose output with either `-v` or `--verbose` uses an aligned inventory table.
 Valid entries use declared skill names; malformed entries use their directory name
 followed by `[invalid: REASON]`. A set with no inspectable entries shows `(no skills)`:
@@ -195,6 +226,7 @@ broken-directory | [invalid: missing description]
 skillset, while an explicit name inspects that set whether it is active or
 inactive. Non-empty sets use the headered, aligned `SKILL | DESCRIPTION` table
 shown above. An empty set prints `No skills installed.` without table headers.
+Manual sets first print `Manual skillset [m]: no upstream lock metadata.`.
 
 When stdout is a TTY, `NO_COLOR` is absent, and `TERM` is not `dumb`, verbose
 `list` and `show` make both header cells bold and valid skill names cyan. They
@@ -209,8 +241,9 @@ styling.
 have a later exact `---` closing line. Before that close, top-level `name` and
 `description` must each appear exactly once and be nonempty. The focused,
 dependency-free reader supports plain scalars, YAML-style single quotes with
-doubled apostrophes, JSON-compatible double-quoted escapes, and exact `|` or
-`>` markers followed by indented block content. Plain and quoted values may
+doubled apostrophes, JSON-compatible double-quoted escapes, and `|` or `>`
+block markers with optional `+` or `-` chomping indicators (such as `>-`),
+followed by indented block content. Plain and quoted values may
 continue on indented physical lines, and trailing comments are ignored outside
 quotes. It ignores extra keys and the body, and collapses whitespace in both
 displayed values.
@@ -268,6 +301,88 @@ skillset remove trial --yes
 The active set is always refused, even with `--yes`. Activate another set with
 `skillset use` before removing it.
 
+## Use skillsets in Codex
+
+Codex recursively discovers skills below `~/.codex/skills` and a project's
+`.codex/skills` directory. Each enabled entry is an absolute link to a managed
+skillset's `skills/` directory. The commands below never replace unrelated
+Codex entries.
+
+### Enable
+
+Enable a skillset globally:
+
+```sh
+skillset codex enable personal
+```
+
+This creates `~/.codex/skills/personal` pointing to
+`~/.agents/skillsets/personal/skills`. `enable` is idempotent for that exact
+link and refuses to replace any other entry. It creates only missing real
+`.codex` and `skills` directories.
+
+Use `-l` or `--local` to manage a `.codex/skills` directory beneath the current
+working directory instead. The target remains an absolute path derived from the
+current user's home directory:
+
+```sh
+skillset codex enable personal --local
+```
+
+`-g`/`--global` explicitly selects `~/.codex` and is the default for `enable`
+and `disable`. The scope flags are mutually exclusive and are available on
+`enable`, `disable`, and `list`.
+
+### Disable
+
+Disable a canonical global link:
+
+```sh
+skillset codex disable personal
+```
+
+Use `--local` to disable the corresponding link in the current project instead.
+`disable` removes only the expected absolute target; it refuses a missing or
+unrelated entry.
+
+### List
+
+List every skillset Codex can discover from the global and current-project
+locations:
+
+```text
+$ skillset codex list
+[g] always-on
+[g] personal [m]
+[l] obra
+```
+
+`[g]` identifies a global link and `[l]` a local link. They are cyan and green,
+respectively, on a color-enabled terminal. A skillset enabled in both locations
+appears twice. There is no `*` marker: all listed skillsets are available to
+Codex.
+
+Use `-g`/`--global` or `-l`/`--local` to inspect one location only; the scope
+marker is then omitted because it would be redundant:
+
+```sh
+skillset codex list --global
+skillset codex list --local
+```
+
+Add `-v` or `--verbose` to either the combined or filtered listing to show the
+same skill inventory table used by `skillset list`:
+
+```sh
+skillset codex list --verbose
+skillset codex list --local --verbose
+```
+
+Rename and removal refuse a globally Codex-enabled skillset; disable it first
+so the link cannot become stale. Local links are intentionally not tracked
+outside their project directory, so disable them before renaming or removing
+their referenced skillset.
+
 ## Diagnose the managed layout
 
 Run the read-only diagnostic command after initialization, when another command
@@ -281,9 +396,8 @@ skillset doctor
 then inspects `.skillset.lock` without following it and, when it is a real regular
 file, holds that lock for the full inspection. A missing `.agents` root or a
 missing, symlinked, or nonregular managed lock is reported alongside missing
-aliases, `active`, and `skillsets`; neither path is created. `doctor` never
-creates, removes, rewrites, retargets, or repairs state, and does not stop at the
-first invalid component. It checks all three canonical aliases, the active target
+aliases, `active`, and `skillsets`; read-only `doctor` creates neither path.
+It does not stop at the first invalid component. It checks all three canonical aliases, the active target
 grammar and existence, direct skillset directory names and shapes, stale
 use/create staging markers, readable version-3 lockfiles, and each direct skill
 directory's `SKILL.md` metadata. Set directories, skill directories, and
@@ -314,6 +428,11 @@ them. When an error names recovery paths:
    back/retarget `active` only after confirming which path contains the data.
 5. Run `skillset doctor` again after manual recovery.
 
-`doctor` is deliberately strict and non-repairing: it never deletes stale
-markers, rewrites lock metadata, changes aliases, or chooses between competing
-copies. Resolve findings manually only after preserving the data they identify.
+`doctor --fix` can repair a deliberately small set of lossless omissions after
+an interactive `y` or `yes` confirmation. It may create a missing advisory lock
+and a missing version-3 empty lockfile only when that skillset's real `skills`
+directory is empty. It never overwrites a file, follows a symlink, invents lock
+metadata for installed skills, deletes stale markers, rewrites lock metadata,
+changes aliases, or chooses between competing copies. Each created file is
+reported as `skillset: repaired:`. Resolve every other finding manually only
+after preserving the data it identifies.
