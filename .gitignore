@@ -16,3 +16,4 @@ __pycache__
 /active
 /skills
 /.skill-lock.json
+/config.json

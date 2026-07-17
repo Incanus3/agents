@@ -6,6 +6,7 @@ import json
 from .errors import OperationalError
 from .layout import (
     NAME_PATTERN,
+    configured_skillsets_directory,
     doctor_operation_lock,
     ensure_manual_sentinel,
     lexists,
@@ -18,6 +19,7 @@ from .layout import (
     set_mode,
     USE_STAGING,
     validate_manual_sentinel,
+    validate_skillsets_directory,
     write_empty_lock,
 )
 from .metadata import parse_frontmatter, printable_text, read_skill_text
@@ -201,15 +203,47 @@ def doctor_set(path, name, errors, warnings):
     return "managed"
 
 
-def doctor_skillsets_directory(skillsets, errors):
+def doctor_skillsets_directory(root, errors):
+    skillsets = root / "skillsets"
+    try:
+        configured = configured_skillsets_directory(root)
+    except OperationalError as error:
+        errors.append(str(error))
+        return False
     try:
         skillsets_mode = skillsets.lstat().st_mode
     except FileNotFoundError:
-        errors.append(f"skillsets directory is missing: {skillsets}")
+        if configured is None:
+            errors.append(f"skillsets directory is missing: {skillsets}")
+        else:
+            errors.append(
+                f"configured skillsets link is missing: {skillsets} -> {configured}"
+            )
     except OSError as error:
         errors.append(f"could not inspect skillsets directory {skillsets}: {error}")
     else:
-        if stat.S_ISLNK(skillsets_mode):
+        if configured is not None:
+            if not stat.S_ISLNK(skillsets_mode):
+                errors.append(
+                    f"configured skillsets link must be a symlink: "
+                    f"{skillsets} -> {configured}"
+                )
+                return False
+            try:
+                target = os.readlink(skillsets)
+            except OSError as error:
+                errors.append(
+                    f"could not read configured skillsets link {skillsets}: {error}"
+                )
+                return False
+            if target != os.fspath(configured):
+                errors.append(
+                    f"configured skillsets link is noncanonical: {skillsets} -> "
+                    f"{target}; expected {configured}"
+                )
+                return False
+            return True
+        elif stat.S_ISLNK(skillsets_mode):
             errors.append(f"skillsets directory symlink is not allowed: {skillsets}")
         elif not stat.S_ISDIR(skillsets_mode):
             errors.append(f"skillsets must be a real directory: {skillsets}")
@@ -385,7 +419,7 @@ def recover_staged_use(root):
 
 def doctor_inspection(root, errors, warnings):
     skillsets = root / "skillsets"
-    skillsets_valid = doctor_skillsets_directory(skillsets, errors)
+    skillsets_valid = doctor_skillsets_directory(root, errors)
 
     doctor_alias(root / "skills", "active/skills", errors)
     active_name = doctor_active_alias(root / "active", skillsets, skillsets_valid, errors)
@@ -450,8 +484,9 @@ def safe_repair_candidates(root):
     if not lexists(advisory_lock):
         candidates.append(advisory_lock)
 
-    skillsets = root / "skillsets"
-    if not real_kind(skillsets, stat.S_ISDIR):
+    try:
+        skillsets = validate_skillsets_directory(root)
+    except OperationalError:
         return candidates
     try:
         entries = sorted(skillsets.iterdir(), key=lambda path: path.name)
