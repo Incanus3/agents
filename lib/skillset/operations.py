@@ -169,6 +169,7 @@ def init(root, name):
         materialize_initial_set(
             root, target, had_skills, had_lock, configured, init_state
         )
+        validate_skillsets_directory(root)
         for path, link_target in (
             (root / "active", f"skillsets/{name}"),
             (root / "skills", "active/skills"),
@@ -176,6 +177,7 @@ def init(root, name):
         ):
             aliases.append((path, link_target))
             os.symlink(link_target, path)
+        validate_skillsets_directory(root)
     except (Exception, KeyboardInterrupt) as error:
         rollback_problems = rollback_init(
             root,

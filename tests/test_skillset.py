@@ -3481,6 +3481,98 @@ _skillset'''
         self.assertFalse(os.path.lexists(external / "default"))
         self.assertEqual(os.readlink(link), str(victim))
 
+    def test_configured_init_refuses_a_link_replaced_after_creation(self):
+        external = self.sandbox / "init-replaced-link-source"
+        victim = self.sandbox / "init-replaced-link-victim"
+        external.mkdir()
+        victim.mkdir()
+        victim_root = self.sandbox / "init-replaced-link-victim-view"
+        victim_root.mkdir()
+        (victim_root / "skillsets").symlink_to(victim, target_is_directory=True)
+        victim_set = self.make_set(victim_root, "default")
+        payload = victim_set / "skills" / "keep"
+        payload.write_bytes(b"victim data")
+        self.write_config(self.home, external)
+        link = self.root / "skillsets"
+        fault = self.fault_environment(
+            f"""
+            import os
+            from pathlib import Path
+            link = Path({str(link)!r})
+            victim = {str(victim)!r}
+            original_symlink = os.symlink
+            def replace_after_link(source, target, *args, **kwargs):
+                result = original_symlink(source, target, *args, **kwargs)
+                if Path(target) == link:
+                    link.unlink()
+                    original_symlink(victim, link)
+                return result
+            os.symlink = replace_after_link
+            """
+        )
+
+        result = self.run_cli("init", "default", extra_environment=fault)
+
+        self.assert_refused(result)
+        self.assertIn(
+            "configured skillsets link is noncanonical",
+            result.stdout + result.stderr,
+        )
+        self.assertIn("rollback was incomplete", result.stdout + result.stderr)
+        self.assertEqual(payload.read_bytes(), b"victim data")
+        self.assertFalse(os.path.lexists(external / "default"))
+        self.assertEqual(os.readlink(link), str(victim))
+        self.assertFalse(os.path.lexists(self.root / "active"))
+        self.assertFalse(os.path.lexists(self.root / "skills"))
+        self.assertFalse(os.path.lexists(self.root / ".skill-lock.json"))
+
+    def test_configured_init_refuses_a_link_replaced_during_alias_creation(self):
+        external = self.sandbox / "init-alias-replaced-link-source"
+        victim = self.sandbox / "init-alias-replaced-link-victim"
+        external.mkdir()
+        victim.mkdir()
+        victim_root = self.sandbox / "init-alias-replaced-link-victim-view"
+        victim_root.mkdir()
+        (victim_root / "skillsets").symlink_to(victim, target_is_directory=True)
+        victim_set = self.make_set(victim_root, "default")
+        payload = victim_set / "skills" / "keep"
+        payload.write_bytes(b"victim data")
+        self.write_config(self.home, external)
+        link = self.root / "skillsets"
+        active = self.root / "active"
+        fault = self.fault_environment(
+            f"""
+            import os
+            from pathlib import Path
+            link = Path({str(link)!r})
+            active = Path({str(active)!r})
+            victim = {str(victim)!r}
+            original_symlink = os.symlink
+            def replace_during_aliases(source, target, *args, **kwargs):
+                result = original_symlink(source, target, *args, **kwargs)
+                if Path(target) == active:
+                    link.unlink()
+                    original_symlink(victim, link)
+                return result
+            os.symlink = replace_during_aliases
+            """
+        )
+
+        result = self.run_cli("init", "default", extra_environment=fault)
+
+        self.assert_refused(result)
+        self.assertIn(
+            "configured skillsets link is noncanonical",
+            result.stdout + result.stderr,
+        )
+        self.assertIn("rollback was incomplete", result.stdout + result.stderr)
+        self.assertEqual(payload.read_bytes(), b"victim data")
+        self.assertFalse(os.path.lexists(external / "default"))
+        self.assertEqual(os.readlink(link), str(victim))
+        self.assertFalse(os.path.lexists(self.root / "active"))
+        self.assertFalse(os.path.lexists(self.root / "skills"))
+        self.assertFalse(os.path.lexists(self.root / ".skill-lock.json"))
+
     def test_init_adopts_existing_skills_and_version_three_lock_without_rewriting(self):
         source_skills = self.root / "skills"
         (source_skills / "alpha" / "nested").mkdir(parents=True)
