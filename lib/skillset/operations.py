@@ -8,6 +8,7 @@ from .codex import canonical_link
 from .errors import OperationalError
 from .layout import (
     canonical_alias,
+    configured_skillsets_directory,
     ensure_manual_sentinel,
     lexists,
     MANUAL_MARKER,
@@ -20,12 +21,15 @@ from .layout import (
     validate_lockfile,
     validate_name,
     validate_set,
+    validate_skillset_entries,
+    validate_skillsets_directory,
     write_empty_lock,
 )
 
 
 def preflight_init(root, name):
     validate_name(name)
+    configured = configured_skillsets_directory(root)
     for managed in (
         root / "skillsets",
         root / "active",
@@ -39,7 +43,13 @@ def preflight_init(root, name):
         raise OperationalError(f"existing skills must be a real directory: {skills}")
     if lexists(lockfile):
         validate_lockfile(lockfile)
-    return lexists(skills), lexists(lockfile)
+    skillsets = configured if configured is not None else root / "skillsets"
+    target = skillsets / name
+    if configured is not None:
+        validate_skillset_entries(configured)
+        if lexists(target):
+            raise OperationalError(f"skillset already exists: {target}")
+    return lexists(skills), lexists(lockfile), configured, target
 
 
 def cleanup_init_aliases(aliases):
@@ -80,22 +90,64 @@ def restore_init_contents(root, target, had_skills, had_lock):
     return problems
 
 
-def rollback_init(root, target, had_skills, had_lock, aliases):
+def rollback_init(
+    root,
+    target,
+    had_skills,
+    had_lock,
+    aliases,
+    configured,
+    container_unowned,
+    target_unowned,
+):
     problems = cleanup_init_aliases(aliases)
-    problems.extend(restore_init_contents(root, target, had_skills, had_lock))
-
-    for directory in (target, root / "skillsets"):
+    if not target_unowned:
+        problems.extend(restore_init_contents(root, target, had_skills, had_lock))
         try:
-            if lexists(directory):
-                directory.rmdir()
+            if lexists(target):
+                target.rmdir()
         except Exception as error:
-            problems.append(f"could not remove {directory}: {error}")
+            problems.append(f"could not remove {target}: {error}")
+
+    skillsets = root / "skillsets"
+    if not container_unowned:
+        try:
+            if configured is None:
+                if lexists(skillsets):
+                    if not real_kind(skillsets, stat.S_ISDIR):
+                        raise OSError(
+                            f"unexpected entry blocks rollback at {skillsets}"
+                        )
+                    skillsets.rmdir()
+            elif skillsets.is_symlink() and os.readlink(skillsets) == os.fspath(
+                configured
+            ):
+                skillsets.unlink()
+            elif lexists(skillsets):
+                raise OSError(f"unexpected entry blocks rollback at {skillsets}")
+        except Exception as error:
+            problems.append(f"could not remove {skillsets}: {error}")
     return problems
 
 
-def materialize_initial_set(root, target, had_skills, had_lock):
-    target.parent.mkdir()
-    target.mkdir()
+def materialize_initial_set(
+    root, target, had_skills, had_lock, configured, init_state
+):
+    skillsets = root / "skillsets"
+    try:
+        if configured is None:
+            skillsets.mkdir()
+        else:
+            os.symlink(os.fspath(configured), skillsets)
+    except FileExistsError:
+        init_state["container_unowned"] = True
+        init_state["target_unowned"] = True
+        raise
+    try:
+        target.mkdir()
+    except FileExistsError:
+        init_state["target_unowned"] = True
+        raise
     if had_skills:
         shutil.move(os.fspath(root / "skills"), os.fspath(target / "skills"))
     else:
@@ -110,11 +162,14 @@ def materialize_initial_set(root, target, had_skills, had_lock):
 
 
 def init(root, name):
-    had_skills, had_lock = preflight_init(root, name)
-    target = set_path(root, name)
+    had_skills, had_lock, configured, target = preflight_init(root, name)
     aliases = []
+    init_state = {"container_unowned": False, "target_unowned": False}
     try:
-        materialize_initial_set(root, target, had_skills, had_lock)
+        materialize_initial_set(
+            root, target, had_skills, had_lock, configured, init_state
+        )
+        validate_skillsets_directory(root)
         for path, link_target in (
             (root / "active", f"skillsets/{name}"),
             (root / "skills", "active/skills"),
@@ -122,14 +177,26 @@ def init(root, name):
         ):
             aliases.append((path, link_target))
             os.symlink(link_target, path)
+        validate_skillsets_directory(root)
     except (Exception, KeyboardInterrupt) as error:
-        rollback_problems = rollback_init(root, target, had_skills, had_lock, aliases)
+        rollback_problems = rollback_init(
+            root,
+            target,
+            had_skills,
+            had_lock,
+            aliases,
+            configured,
+            init_state["container_unowned"],
+            init_state["target_unowned"],
+        )
         if rollback_problems:
             details = "; ".join(rollback_problems)
+            source = configured if configured is not None else root / "skillsets"
             raise OperationalError(
                 f"initialization failed ({error}); rollback was incomplete ({details}). "
                 f"Inspect original paths {root / 'skills'} and "
                 f"{root / '.skill-lock.json'} plus staged set {target}; "
+                f"configured source is {source}; "
                 "preserve the only remaining copy of any data, run `skillset doctor`, "
                 "and restore any missing original only from its staged counterpart."
             ) from error
@@ -164,7 +231,9 @@ def create(root, name, source, manual=False):
         validate_name(source)
     validate_layout(root)
     destination = set_path(root, name)
-    staging = root / "skillsets" / f".skillset-create-{name}.staging"
+    staging = (
+        validate_skillsets_directory(root) / f".skillset-create-{name}.staging"
+    )
     if lexists(destination):
         raise OperationalError(f"skillset already exists: {destination}")
     if lexists(staging):
@@ -421,6 +490,7 @@ def remove(root, name, confirmed):
         )
     if not confirmed:
         confirm_removal(name)
+        validate_skillsets_directory(root)
     try:
         shutil.rmtree(target)
     except Exception as error:

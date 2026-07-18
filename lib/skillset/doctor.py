@@ -18,6 +18,7 @@ from .layout import (
     set_mode,
     USE_STAGING,
     validate_manual_sentinel,
+    validate_skillsets_directory,
     write_empty_lock,
 )
 from .metadata import parse_frontmatter, printable_text, read_skill_text
@@ -201,21 +202,12 @@ def doctor_set(path, name, errors, warnings):
     return "managed"
 
 
-def doctor_skillsets_directory(skillsets, errors):
+def doctor_skillsets_directory(root, errors):
     try:
-        skillsets_mode = skillsets.lstat().st_mode
-    except FileNotFoundError:
-        errors.append(f"skillsets directory is missing: {skillsets}")
-    except OSError as error:
-        errors.append(f"could not inspect skillsets directory {skillsets}: {error}")
-    else:
-        if stat.S_ISLNK(skillsets_mode):
-            errors.append(f"skillsets directory symlink is not allowed: {skillsets}")
-        elif not stat.S_ISDIR(skillsets_mode):
-            errors.append(f"skillsets must be a real directory: {skillsets}")
-        else:
-            return True
-    return False
+        return validate_skillsets_directory(root)
+    except OperationalError as error:
+        errors.append(str(error))
+        return None
 
 
 def doctor_active_alias(active, skillsets, skillsets_valid, errors):
@@ -384,8 +376,10 @@ def recover_staged_use(root):
 
 
 def doctor_inspection(root, errors, warnings):
-    skillsets = root / "skillsets"
-    skillsets_valid = doctor_skillsets_directory(skillsets, errors)
+    skillsets = doctor_skillsets_directory(root, errors)
+    skillsets_valid = skillsets is not None
+    if skillsets is None:
+        skillsets = root / "skillsets"
 
     doctor_alias(root / "skills", "active/skills", errors)
     active_name = doctor_active_alias(root / "active", skillsets, skillsets_valid, errors)
@@ -450,8 +444,9 @@ def safe_repair_candidates(root):
     if not lexists(advisory_lock):
         candidates.append(advisory_lock)
 
-    skillsets = root / "skillsets"
-    if not real_kind(skillsets, stat.S_ISDIR):
+    try:
+        skillsets = validate_skillsets_directory(root)
+    except OperationalError:
         return candidates
     try:
         entries = sorted(skillsets.iterdir(), key=lambda path: path.name)

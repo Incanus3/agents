@@ -34,6 +34,57 @@ This reads the managed layout from `/path/to/alternate-home/.agents`. The
 alternate home directory must already exist. The override also applies to any
 upstream `skills` command delegated through `skillset skills`.
 
+## Store skillsets in another directory
+
+By default, named collections live in the real `~/.agents/skillsets`
+directory. To keep them in a repository or another durable location, create
+that directory first and add a real `~/.agents/config.json`:
+
+```json
+{
+  "version": 1,
+  "skillsets_directory": "/home/alice/Repos/dotfiles/skills"
+}
+```
+
+The path must be absolute and normalized, outside the managed `~/.agents` root,
+and it must name an existing real directory rather than a symlink. The
+configured directory contains the named set directories (`default/`, `work/`,
+and so on), not one flat collection of skills. Configuration does not permit
+symlinked sets, `skills/` directories, or individual skill directories.
+Use a dedicated directory inside the Git repository, not the repository root;
+otherwise repository metadata such as `.git` is treated as a named skillset and
+makes the configured layout invalid.
+
+On a fresh installation, write the config before initialization:
+
+```sh
+mkdir -p /home/alice/Repos/dotfiles/skills
+skillset init default
+```
+
+Initialization creates the exact absolute
+`~/.agents/skillsets -> /home/alice/Repos/dotfiles/skills` link and creates the
+initial named set in the configured directory. Other valid named sets may
+already be present, but the initial name must be unused. Runtime aliases and
+locks remain under `~/.agents`.
+
+To migrate an initialized installation, stop concurrent `skillset` and
+delegated upstream commands, move the real `~/.agents/skillsets` directory to
+the desired destination, write `config.json`, and replace the old location with
+the exact absolute link. Then run:
+
+```sh
+skillset doctor
+skillset list
+skillset current
+```
+
+One `~/.agents` installation should own a configured directory. Sharing the
+same directory between installations with independent advisory locks is not
+supported. An alternate `HOME` continues to select both its own
+`.agents/config.json` and its own runtime state.
+
 ## Shell completions
 
 Load completions for the current shell session:

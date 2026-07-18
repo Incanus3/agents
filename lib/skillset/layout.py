@@ -4,12 +4,16 @@ import os
 import re
 import stat
 from contextlib import contextmanager
+from pathlib import Path
 
 from .errors import OperationalError
 
 
 EMPTY_LOCK = {"version": 3, "skills": {}, "dismissed": {}}
 NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
+CONFIG_NAME = "config.json"
+CONFIG_VERSION = 1
+CONFIG_KEYS = {"version", "skillsets_directory"}
 MANUAL_MARKER = ".skillset-manual"
 MANUAL_SENTINEL_NAME = ".skillset-manual-empty-lock.json"
 MANUAL_SENTINEL = f"../{MANUAL_SENTINEL_NAME}"
@@ -37,10 +41,118 @@ def validate_name(name):
         )
 
 
+def configured_skillsets_directory(root):
+    """Return the configured external skillsets directory, or None."""
+    config = root / CONFIG_NAME
+    if not lexists(config):
+        return None
+    if not real_kind(config, stat.S_ISREG):
+        raise OperationalError(f"config must be a real regular file: {config}")
+    try:
+        contents = config.read_text(encoding="utf-8")
+        value = json.loads(contents)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise OperationalError(f"invalid config {config}: {error}") from error
+    if not isinstance(value, dict) or set(value) != CONFIG_KEYS:
+        raise OperationalError(
+            f"config must contain exactly 'version' and "
+            f"'skillsets_directory': {config}"
+        )
+    if type(value["version"]) is not int or value["version"] != CONFIG_VERSION:
+        raise OperationalError(
+            f"config must use integer version {CONFIG_VERSION}: {config}"
+        )
+    serialized = value["skillsets_directory"]
+    if not isinstance(serialized, str) or not serialized or "\0" in serialized:
+        raise OperationalError(
+            f"configured skillsets directory must be a nonempty absolute path: {config}"
+        )
+    normalized = os.path.normpath(serialized)
+    if not os.path.isabs(serialized) or serialized != normalized:
+        raise OperationalError(
+            f"configured skillsets directory must be a normalized absolute path: {config}"
+        )
+    source = Path(normalized)
+    managed_root = Path(os.path.normpath(os.fspath(root)))
+    if source == managed_root or managed_root in source.parents:
+        raise OperationalError(
+            f"configured skillsets directory must be outside the managed root: {source}"
+        )
+    if not real_kind(source, stat.S_ISDIR):
+        raise OperationalError(
+            f"configured skillsets directory must be an existing real directory: {source}"
+        )
+    try:
+        resolved_source = source.resolve(strict=True)
+        resolved_root = managed_root.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise OperationalError(
+            f"could not resolve configured skillsets directory {source}: {error}"
+        ) from error
+    if resolved_source == resolved_root or resolved_root in resolved_source.parents:
+        raise OperationalError(
+            f"configured skillsets directory must resolve outside the managed root: {source}"
+        )
+    return source
+
+
+def validate_skillsets_directory(root):
+    """Validate the managed container and return its real storage directory."""
+    skillsets = root / "skillsets"
+    configured = configured_skillsets_directory(root)
+    if configured is None:
+        try:
+            mode = skillsets.lstat().st_mode
+        except FileNotFoundError as error:
+            raise OperationalError(
+                f"skillsets directory is missing: {skillsets}"
+            ) from error
+        except OSError as error:
+            raise OperationalError(
+                f"could not inspect skillsets directory {skillsets}: {error}"
+            ) from error
+        if stat.S_ISLNK(mode):
+            raise OperationalError(
+                f"skillsets directory symlink is not allowed: {skillsets}"
+            )
+        if not stat.S_ISDIR(mode):
+            raise OperationalError(
+                f"skillsets must be a real directory: {skillsets}"
+            )
+        return skillsets
+    try:
+        mode = skillsets.lstat().st_mode
+    except FileNotFoundError as error:
+        raise OperationalError(
+            f"configured skillsets link is missing: {skillsets} -> {configured}"
+        ) from error
+    except OSError as error:
+        raise OperationalError(
+            f"could not inspect skillsets directory {skillsets}: {error}"
+        ) from error
+    if not stat.S_ISLNK(mode):
+        raise OperationalError(
+            f"configured skillsets link must be a symlink: {skillsets} -> {configured}"
+        )
+    try:
+        target = os.readlink(skillsets)
+    except OSError as error:
+        raise OperationalError(
+            f"could not read configured skillsets link {skillsets}: {error}"
+        ) from error
+    if target != os.fspath(configured):
+        raise OperationalError(
+            f"configured skillsets link is noncanonical: {skillsets} -> {target}; "
+            f"expected {configured}"
+        )
+    return configured
+
+
 def set_path(root, name):
     validate_name(name)
-    path = root / "skillsets" / name
-    if path.parent != root / "skillsets":
+    skillsets = validate_skillsets_directory(root)
+    path = skillsets / name
+    if path.parent != skillsets:
         raise OperationalError(f"unsafe skillset path for {name!r}")
     return path
 
@@ -79,9 +191,8 @@ def validate_manual_marker(path):
         raise OperationalError(f"could not inspect manual marker {path}: {error}") from error
 
 
-def set_mode(root, name):
-    """Validate a set and return its explicit management mode."""
-    path = set_path(root, name)
+def skillset_mode(path):
+    """Validate a set path and return its explicit management mode."""
     if not real_kind(path, stat.S_ISDIR):
         raise OperationalError(f"skillset must be a real directory: {path}")
     skills = path / "skills"
@@ -98,6 +209,23 @@ def set_mode(root, name):
         return "manual"
     validate_lockfile(lockfile)
     return "managed"
+
+
+def validate_skillset_entries(skillsets):
+    for entry in skillsets.iterdir():
+        if entry.name.startswith(".skillset-create-") and entry.name.endswith(
+            ".staging"
+        ):
+            raise OperationalError(
+                f"stale create staging path must be recovered: {entry}"
+            )
+        validate_name(entry.name)
+        skillset_mode(entry)
+
+
+def set_mode(root, name):
+    """Validate a named set and return its explicit management mode."""
+    return skillset_mode(set_path(root, name))
 
 
 def validate_set(root, name):
@@ -169,9 +297,7 @@ def validate_active_set(root):
 
 
 def validate_layout(root, repair_missing_manual_sentinel=False):
-    skillsets = root / "skillsets"
-    if not real_kind(skillsets, stat.S_ISDIR):
-        raise OperationalError("skillsets are not initialized")
+    skillsets = validate_skillsets_directory(root)
     use_staging = root / USE_STAGING
     if lexists(use_staging):
         raise OperationalError(
@@ -188,15 +314,7 @@ def validate_layout(root, repair_missing_manual_sentinel=False):
         require_alias(root / ".skill-lock.json", MANUAL_SENTINEL)
     else:
         require_alias(root / ".skill-lock.json", "active/.skill-lock.json")
-    for entry in skillsets.iterdir():
-        if entry.name.startswith(".skillset-create-") and entry.name.endswith(
-            ".staging"
-        ):
-            raise OperationalError(
-                f"stale create staging path must be recovered: {entry}"
-            )
-        validate_name(entry.name)
-        validate_set(root, entry.name)
+    validate_skillset_entries(skillsets)
     return active_name
 
 

@@ -134,6 +134,23 @@ class SkillsetTests(unittest.TestCase):
         data = raw if raw is not None else json.dumps(value) + "\n"
         path.write_text(data, encoding="utf-8")
 
+    def write_config(self, home, source, value=None, *, raw=None):
+        root = home / ".agents"
+        root.mkdir(parents=True, exist_ok=True)
+        config = root / "config.json"
+        data = (
+            raw
+            if raw is not None
+            else json.dumps(
+                value
+                if value is not None
+                else {"version": 1, "skillsets_directory": str(source)}
+            )
+            + "\n"
+        )
+        config.write_text(data, encoding="utf-8")
+        return config
+
     def make_set(self, root, name, lock=EMPTY_LOCK):
         skillset = root / "skillsets" / name
         (skillset / "skills").mkdir(parents=True)
@@ -936,6 +953,329 @@ _skillset'''
         self.assertEqual(
             self.filesystem_snapshot(external_skillsets), external_before
         )
+
+    def test_doctor_rejects_mismatched_configured_link_before_descendant_access(self):
+        configured = self.sandbox / "configured-doctor-source"
+        configured.mkdir()
+        mismatched = self.sandbox / "mismatched-doctor-source"
+        default = mismatched / "default"
+        (default / "skills").mkdir(parents=True)
+        self.write_skill(
+            default / "skills",
+            "external-sentinel",
+            "name: external-sentinel\n"
+            "description: metadata beyond a mismatched configured link",
+        )
+        self.write_lock(default / ".skill-lock.json")
+        self.write_config(self.home, configured)
+        (self.root / ".skillset.lock").write_text("", encoding="utf-8")
+        skillsets = self.root / "skillsets"
+        skillsets.symlink_to(mismatched, target_is_directory=True)
+        (self.root / "active").symlink_to("skillsets/default")
+        (self.root / "skills").symlink_to("active/skills")
+        (self.root / ".skill-lock.json").symlink_to("active/.skill-lock.json")
+
+        descendant_accessed = self.sandbox / "configured-link-descendant-accessed"
+        descendant_prefix = str(skillsets) + os.sep
+        fault = self.fault_environment(
+            f"""
+            import os
+            from pathlib import Path
+            marker = Path({str(descendant_accessed)!r})
+            descendant_prefix = {descendant_prefix!r}
+            original_lstat = os.lstat
+            original_iterdir = Path.iterdir
+            def guarded_lstat(path, *args, **kwargs):
+                candidate = os.fsdecode(os.fspath(path))
+                if candidate.startswith(descendant_prefix):
+                    marker.write_text(candidate, encoding="utf-8")
+                return original_lstat(path, *args, **kwargs)
+            def guarded_iterdir(path, *args, **kwargs):
+                candidate = os.fsdecode(os.fspath(path))
+                if candidate == descendant_prefix.rstrip(os.sep):
+                    marker.write_text(candidate, encoding="utf-8")
+                return original_iterdir(path, *args, **kwargs)
+            os.lstat = guarded_lstat
+            Path.iterdir = guarded_iterdir
+            """
+        )
+        home_before = self.filesystem_snapshot(self.home)
+        configured_before = self.filesystem_snapshot(configured)
+        mismatched_before = self.filesystem_snapshot(mismatched)
+
+        result = self.run_cli("doctor", extra_environment=fault)
+
+        self.assert_refused(result)
+        self.assertIn(
+            "configured skillsets link is noncanonical", result.stdout + result.stderr
+        )
+        self.assertNotIn("external-sentinel", result.stdout + result.stderr)
+        self.assertNotIn("metadata beyond", result.stdout + result.stderr)
+        self.assertFalse(descendant_accessed.exists())
+        self.assertEqual(self.filesystem_snapshot(self.home), home_before)
+        self.assertEqual(self.filesystem_snapshot(configured), configured_before)
+        self.assertEqual(self.filesystem_snapshot(mismatched), mismatched_before)
+
+    def test_doctor_rejects_structurally_invalid_configured_links_without_source_access(
+        self,
+    ):
+        external = self.sandbox / "configured-link-structure-source"
+        default = external / "default"
+        (default / "skills").mkdir(parents=True)
+        self.write_lock(default / ".skill-lock.json")
+        source_prefix = str(external) + os.sep
+        cases = (
+            ("missing", None, "configured skillsets link is missing"),
+            ("directory", "directory", "configured skillsets link must be a symlink"),
+            ("file", "file", "configured skillsets link must be a symlink"),
+        )
+
+        for index, (label, entry_kind, expected) in enumerate(cases):
+            with self.subTest(label=label):
+                home = self.new_home(f"configured-link-structure-{index}")
+                root = home / ".agents"
+                self.write_config(home, external)
+                (root / ".skillset.lock").write_text("", encoding="utf-8")
+                skillsets = root / "skillsets"
+                if entry_kind == "directory":
+                    skillsets.mkdir()
+                elif entry_kind == "file":
+                    skillsets.write_text("not a link\n", encoding="utf-8")
+                (root / "active").symlink_to("skillsets/default")
+                (root / "skills").symlink_to("active/skills")
+                (root / ".skill-lock.json").symlink_to("active/.skill-lock.json")
+
+                descendant_accessed = (
+                    self.sandbox / f"configured-structure-descendant-{index}"
+                )
+                fault = self.fault_environment(
+                    f"""
+                    import os
+                    from pathlib import Path
+                    marker = Path({str(descendant_accessed)!r})
+                    source = {str(external)!r}
+                    source_prefix = {source_prefix!r}
+                    original_lstat = os.lstat
+                    original_iterdir = Path.iterdir
+                    def guarded_lstat(path, *args, **kwargs):
+                        candidate = os.fsdecode(os.fspath(path))
+                        if candidate.startswith(source_prefix):
+                            marker.write_text(candidate, encoding="utf-8")
+                        return original_lstat(path, *args, **kwargs)
+                    def guarded_iterdir(path, *args, **kwargs):
+                        candidate = os.fsdecode(os.fspath(path))
+                        if candidate == source:
+                            marker.write_text(candidate, encoding="utf-8")
+                        return original_iterdir(path, *args, **kwargs)
+                    os.lstat = guarded_lstat
+                    Path.iterdir = guarded_iterdir
+                    """
+                )
+                home_before = self.filesystem_snapshot(home)
+                external_before = self.filesystem_snapshot(external)
+
+                result = self.run_cli(
+                    "doctor", home=home, extra_environment=fault
+                )
+
+                self.assert_refused(result)
+                errors = self.doctor_findings(result, "error")
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(expected, errors[0])
+                self.assertEqual(self.doctor_findings(result, "warning"), [])
+                self.assertFalse(
+                    descendant_accessed.exists(),
+                    "doctor inspected the configured source after link rejection",
+                )
+                self.assertEqual(self.filesystem_snapshot(home), home_before)
+                self.assertEqual(
+                    self.filesystem_snapshot(external), external_before
+                )
+
+    def test_doctor_reports_configured_link_permission_failures_without_source_access(
+        self,
+    ):
+        external = self.sandbox / "configured-link-permission-source"
+        default = external / "default"
+        (default / "skills").mkdir(parents=True)
+        self.write_lock(default / ".skill-lock.json")
+        source_prefix = str(external) + os.sep
+        cases = (
+            ("lstat", "could not inspect skillsets directory"),
+            ("readlink", "could not read configured skillsets link"),
+        )
+
+        for index, (failure, expected) in enumerate(cases):
+            with self.subTest(failure=failure):
+                home = self.new_home(f"configured-link-permission-{index}")
+                root = home / ".agents"
+                self.write_config(home, external)
+                (root / ".skillset.lock").write_text("", encoding="utf-8")
+                skillsets = root / "skillsets"
+                skillsets.symlink_to(external, target_is_directory=True)
+                (root / "active").symlink_to("skillsets/default")
+                (root / "skills").symlink_to("active/skills")
+                (root / ".skill-lock.json").symlink_to("active/.skill-lock.json")
+
+                descendant_accessed = (
+                    self.sandbox / f"configured-permission-descendant-{index}"
+                )
+                fault = self.fault_environment(
+                    f"""
+                    import errno
+                    import os
+                    from pathlib import Path
+                    failure = {failure!r}
+                    marker = Path({str(descendant_accessed)!r})
+                    link = {str(skillsets)!r}
+                    source = {str(external)!r}
+                    source_prefix = {source_prefix!r}
+                    original_lstat = os.lstat
+                    original_readlink = os.readlink
+                    original_path_lstat = Path.lstat
+                    original_iterdir = Path.iterdir
+                    def guarded_lstat(path, *args, **kwargs):
+                        candidate = os.fsdecode(os.fspath(path))
+                        if candidate == link and failure == "lstat":
+                            raise PermissionError(
+                                errno.EACCES, os.strerror(errno.EACCES), candidate
+                            )
+                        if candidate.startswith(source_prefix):
+                            marker.write_text(candidate, encoding="utf-8")
+                        return original_lstat(path, *args, **kwargs)
+                    def guarded_path_lstat(path, *args, **kwargs):
+                        candidate = os.fsdecode(os.fspath(path))
+                        if candidate == link and failure == "lstat":
+                            raise PermissionError(
+                                errno.EACCES, os.strerror(errno.EACCES), candidate
+                            )
+                        if candidate.startswith(source_prefix):
+                            marker.write_text(candidate, encoding="utf-8")
+                        return original_path_lstat(path, *args, **kwargs)
+                    def guarded_readlink(path, *args, **kwargs):
+                        candidate = os.fsdecode(os.fspath(path))
+                        if candidate == link and failure == "readlink":
+                            raise PermissionError(
+                                errno.EACCES, os.strerror(errno.EACCES), candidate
+                            )
+                        return original_readlink(path, *args, **kwargs)
+                    def guarded_iterdir(path, *args, **kwargs):
+                        candidate = os.fsdecode(os.fspath(path))
+                        if candidate == source:
+                            marker.write_text(candidate, encoding="utf-8")
+                        return original_iterdir(path, *args, **kwargs)
+                    os.lstat = guarded_lstat
+                    os.readlink = guarded_readlink
+                    Path.lstat = guarded_path_lstat
+                    Path.iterdir = guarded_iterdir
+                    """
+                )
+                home_before = self.filesystem_snapshot(home)
+                external_before = self.filesystem_snapshot(external)
+
+                result = self.run_cli(
+                    "doctor", home=home, extra_environment=fault
+                )
+
+                self.assert_refused(result)
+                errors = self.doctor_findings(result, "error")
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(expected, errors[0])
+                self.assertIn("Permission denied", errors[0])
+                self.assertEqual(self.doctor_findings(result, "warning"), [])
+                self.assertFalse(
+                    descendant_accessed.exists(),
+                    "doctor inspected the configured source after permission failure",
+                )
+                self.assertEqual(self.filesystem_snapshot(home), home_before)
+                self.assertEqual(
+                    self.filesystem_snapshot(external), external_before
+                )
+
+    def test_doctor_rejects_invalid_config_before_skillsets_descendant_access(self):
+        external = self.sandbox / "invalid-config-doctor-source"
+        default = external / "default"
+        (default / "skills").mkdir(parents=True)
+        self.write_skill(
+            default / "skills",
+            "external-sentinel",
+            "name: external-sentinel\n"
+            "description: metadata beyond an invalid configuration",
+        )
+        self.write_lock(default / ".skill-lock.json")
+        cases = (
+            ("malformed", "{not json\n", "invalid config"),
+            (
+                "wrong-version",
+                json.dumps(
+                    {"version": 2, "skillsets_directory": str(external)}
+                )
+                + "\n",
+                "integer version 1",
+            ),
+        )
+
+        for index, (label, raw_config, expected) in enumerate(cases):
+            with self.subTest(label=label):
+                home = self.new_home(f"invalid-doctor-config-{index}")
+                root = home / ".agents"
+                self.write_config(home, external, raw=raw_config)
+                (root / ".skillset.lock").write_text("", encoding="utf-8")
+                skillsets = root / "skillsets"
+                skillsets.symlink_to(external, target_is_directory=True)
+                (root / "active").symlink_to("skillsets/default")
+                (root / "skills").symlink_to("active/skills")
+                (root / ".skill-lock.json").symlink_to("active/.skill-lock.json")
+
+                descendant_accessed = (
+                    self.sandbox / f"invalid-config-descendant-accessed-{index}"
+                )
+                descendant_prefix = str(skillsets) + os.sep
+                fault = self.fault_environment(
+                    f"""
+                    import os
+                    from pathlib import Path
+                    marker = Path({str(descendant_accessed)!r})
+                    descendant_prefix = {descendant_prefix!r}
+                    original_lstat = os.lstat
+                    original_iterdir = Path.iterdir
+                    def guarded_lstat(path, *args, **kwargs):
+                        candidate = os.fsdecode(os.fspath(path))
+                        if candidate.startswith(descendant_prefix):
+                            marker.write_text(candidate, encoding="utf-8")
+                        return original_lstat(path, *args, **kwargs)
+                    def guarded_iterdir(path, *args, **kwargs):
+                        candidate = os.fsdecode(os.fspath(path))
+                        if candidate == descendant_prefix.rstrip(os.sep):
+                            marker.write_text(candidate, encoding="utf-8")
+                        return original_iterdir(path, *args, **kwargs)
+                    os.lstat = guarded_lstat
+                    Path.iterdir = guarded_iterdir
+                    """
+                )
+                home_before = self.filesystem_snapshot(home)
+                external_before = self.filesystem_snapshot(external)
+
+                result = self.run_cli(
+                    "doctor", home=home, extra_environment=fault
+                )
+
+                self.assert_refused(result)
+                errors = self.doctor_findings(result, "error")
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(expected, errors[0])
+                self.assertNotIn(
+                    "external-sentinel", result.stdout + result.stderr
+                )
+                self.assertNotIn("metadata beyond", result.stdout + result.stderr)
+                self.assertFalse(
+                    descendant_accessed.exists(),
+                    "doctor inspected a descendant with invalid configuration",
+                )
+                self.assertEqual(self.filesystem_snapshot(home), home_before)
+                self.assertEqual(
+                    self.filesystem_snapshot(external), external_before
+                )
 
     def test_doctor_aggregates_uninitialized_state_without_creating_files(self):
         self.root.mkdir()
@@ -2716,6 +3056,533 @@ _skillset'''
         self.assert_aliases(self.root, "default")
         self.assert_empty_set(self.root, "default")
         self.assertTrue((self.root / ".skillset.lock").is_file())
+
+    def test_configured_external_directory_supports_complete_lifecycle(self):
+        external = self.sandbox / "repository-skillsets"
+        external.mkdir()
+        self.write_config(self.home, external)
+
+        initialized = self.run_cli("init", "default")
+        created = self.run_cli("create", "experiment")
+        activated = self.run_cli("use", "experiment")
+        renamed = self.run_cli("rename", "default", "baseline")
+        removed = self.run_cli("remove", "baseline", "--yes")
+        codex_enabled = self.run_cli("codex", "enable", "experiment")
+        codex_listed = self.run_cli("codex", "list")
+        codex_disabled = self.run_cli("codex", "disable", "experiment")
+        inspected = self.run_cli("doctor")
+
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        self.assertEqual(created.returncode, 0, created.stderr)
+        self.assertEqual(activated.returncode, 0, activated.stderr)
+        self.assertEqual(renamed.returncode, 0, renamed.stderr)
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertEqual(codex_enabled.returncode, 0, codex_enabled.stderr)
+        self.assertEqual(codex_listed.stdout, "[g] experiment\n")
+        self.assertEqual(codex_disabled.returncode, 0, codex_disabled.stderr)
+        self.assertEqual(inspected.returncode, 0, inspected.stderr)
+        self.assertTrue((self.root / "skillsets").is_symlink())
+        self.assertEqual(os.readlink(self.root / "skillsets"), str(external))
+        self.assert_empty_set(self.root, "experiment")
+        self.assert_aliases(self.root, "experiment")
+        self.assertEqual(self.run_cli("current").stdout, "experiment\n")
+        self.assertEqual(self.run_cli("list").stdout, "* experiment\n")
+        self.assertFalse(os.path.lexists(external / "default"))
+        self.assertFalse(os.path.lexists(external / "baseline"))
+        self.assertTrue((external / "experiment").is_dir())
+        self.assertFalse(
+            os.path.lexists(self.home / ".codex" / "skills" / "experiment")
+        )
+
+    def test_configured_init_accepts_other_valid_sets_and_refuses_name_collision(self):
+        external = self.sandbox / "shared-skillsets"
+        external.mkdir()
+        external_root = self.sandbox / "external-root-view"
+        external_root.mkdir()
+        (external_root / "skillsets").symlink_to(external, target_is_directory=True)
+        existing = self.make_set(external_root, "existing")
+        marker = existing / "skills" / "keep"
+        marker.write_bytes(b"unrelated")
+        self.write_config(self.home, external)
+
+        initialized = self.run_cli("init", "default")
+
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        self.assertEqual(marker.read_bytes(), b"unrelated")
+        self.assertTrue((external / "default").is_dir())
+
+        other_home = self.new_home("configured-collision")
+        self.write_config(other_home, external)
+        before = self.tree_contract_snapshot(external)
+        collision = self.run_cli("init", "existing", home=other_home)
+
+        self.assert_refused(collision)
+        self.assertEqual(self.tree_contract_snapshot(external), before)
+        self.assertFalse(os.path.lexists(other_home / ".agents" / "skillsets"))
+
+    def test_configured_remove_refuses_a_replaced_managed_link_after_confirmation(self):
+        external = self.sandbox / "configured-remove-source"
+        victim = self.sandbox / "configured-remove-victim"
+        external.mkdir()
+        victim.mkdir()
+        self.write_config(self.home, external)
+        self.assertEqual(self.run_cli("init", "default").returncode, 0)
+        self.assertEqual(self.run_cli("create", "doomed").returncode, 0)
+
+        victim_root = self.sandbox / "configured-remove-victim-view"
+        victim_root.mkdir()
+        (victim_root / "skillsets").symlink_to(victim, target_is_directory=True)
+        victim_set = self.make_set(victim_root, "doomed")
+        payload = victim_set / "skills" / "keep"
+        payload.write_bytes(b"victim data")
+        link = self.root / "skillsets"
+        fault = self.fault_environment(
+            f"""
+            import os
+            import sys
+            from pathlib import Path
+            original_stdin = sys.stdin
+            link = Path({str(link)!r})
+            victim = {str(victim)!r}
+            class SwappingStdin:
+                def readline(self, *args, **kwargs):
+                    link.unlink()
+                    os.symlink(victim, link)
+                    return "yes\\n"
+                def __getattr__(self, name):
+                    return getattr(original_stdin, name)
+            sys.stdin = SwappingStdin()
+            """
+        )
+
+        result = self.run_cli("remove", "doomed", extra_environment=fault)
+
+        self.assert_refused(result)
+        self.assertIn(
+            "configured skillsets link is noncanonical",
+            result.stdout + result.stderr,
+        )
+        self.assertTrue((external / "doomed").is_dir())
+        self.assertEqual(payload.read_bytes(), b"victim data")
+        self.assertEqual(os.readlink(link), str(victim))
+
+    def test_configured_init_preserves_a_set_created_after_preflight(self):
+        external = self.sandbox / "configured-init-race"
+        external.mkdir()
+        self.write_config(self.home, external)
+        target = external / "default"
+        payload = target / "skills" / "keep"
+        fault = self.fault_environment(
+            f"""
+            import json
+            from pathlib import Path
+            target = Path({str(target)!r})
+            original_mkdir = Path.mkdir
+            injected = False
+            def create_collision(path, *args, **kwargs):
+                global injected
+                if path == target and not injected:
+                    injected = True
+                    original_mkdir(target)
+                    original_mkdir(target / "skills")
+                    (target / "skills" / "keep").write_bytes(b"concurrent data")
+                    (target / ".skill-lock.json").write_text(
+                        json.dumps({EMPTY_LOCK!r}) + "\\n",
+                        encoding="utf-8",
+                    )
+                return original_mkdir(path, *args, **kwargs)
+            Path.mkdir = create_collision
+            """
+        )
+
+        result = self.run_cli("init", "default", extra_environment=fault)
+
+        self.assert_refused(result)
+        self.assertIn("File exists", result.stdout + result.stderr)
+        self.assertEqual(payload.read_bytes(), b"concurrent data")
+        self.assertEqual(
+            json.loads((target / ".skill-lock.json").read_text(encoding="utf-8")),
+            EMPTY_LOCK,
+        )
+        self.assertFalse(os.path.lexists(self.root / "skillsets"))
+
+    def test_configured_init_preserves_a_link_and_set_created_after_preflight(self):
+        external = self.sandbox / "configured-init-link-race"
+        external.mkdir()
+        self.write_config(self.home, external)
+        link = self.root / "skillsets"
+        target = external / "default"
+        payload = target / "skills" / "keep"
+        fault = self.fault_environment(
+            f"""
+            import json
+            import os
+            from pathlib import Path
+            link = Path({str(link)!r})
+            external = {str(external)!r}
+            target = Path({str(target)!r})
+            original_symlink = os.symlink
+            injected = False
+            def create_collision(source, destination, *args, **kwargs):
+                global injected
+                if Path(destination) == link and not injected:
+                    injected = True
+                    original_symlink(external, link)
+                    target.mkdir()
+                    (target / "skills").mkdir()
+                    (target / "skills" / "keep").write_bytes(b"concurrent data")
+                    (target / ".skill-lock.json").write_text(
+                        json.dumps({EMPTY_LOCK!r}) + "\\n",
+                        encoding="utf-8",
+                    )
+                return original_symlink(source, destination, *args, **kwargs)
+            os.symlink = create_collision
+            """
+        )
+
+        result = self.run_cli("init", "default", extra_environment=fault)
+
+        self.assert_refused(result)
+        self.assertIn("File exists", result.stdout + result.stderr)
+        self.assertEqual(payload.read_bytes(), b"concurrent data")
+        self.assertEqual(os.readlink(link), str(external))
+
+    def test_configured_init_rejects_stale_create_staging_without_mutation(self):
+        external = self.sandbox / "stale-staging-skillsets"
+        staging = external / ".skillset-create-foo.staging"
+        staging.mkdir(parents=True)
+        marker = staging / "keep"
+        marker.write_bytes(b"partially created data")
+        self.write_config(self.home, external)
+        (self.root / ".skillset.lock").write_text("", encoding="utf-8")
+        home_before = self.filesystem_snapshot(self.home)
+        external_before = self.filesystem_snapshot(external)
+
+        result = self.run_cli("init", "default")
+
+        self.assert_refused(result)
+        self.assertIn(
+            f"stale create staging path must be recovered: {staging}",
+            result.stdout + result.stderr,
+        )
+        self.assertEqual(self.filesystem_snapshot(self.home), home_before)
+        self.assertEqual(self.filesystem_snapshot(external), external_before)
+        self.assertFalse(os.path.lexists(self.root / "skillsets"))
+
+    def test_config_validation_rejects_noncanonical_or_untrusted_sources(self):
+        real_source = self.sandbox / "real-config-source"
+        real_source.mkdir()
+        source_link = self.sandbox / "linked-config-source"
+        source_link.symlink_to(real_source, target_is_directory=True)
+        cases = (
+            ("malformed", None, "{not json\n", "invalid config"),
+            (
+                "extra-key",
+                {
+                    "version": 1,
+                    "skillsets_directory": str(real_source),
+                    "extra": True,
+                },
+                None,
+                "exactly",
+            ),
+            (
+                "wrong-version",
+                {"version": 2, "skillsets_directory": str(real_source)},
+                None,
+                "integer version 1",
+            ),
+            (
+                "relative",
+                {"version": 1, "skillsets_directory": "relative/skillsets"},
+                None,
+                "normalized absolute path",
+            ),
+            (
+                "nonnormalized",
+                {
+                    "version": 1,
+                    "skillsets_directory": str(real_source / ".." / real_source.name),
+                },
+                None,
+                "normalized absolute path",
+            ),
+            (
+                "missing",
+                {
+                    "version": 1,
+                    "skillsets_directory": str(self.sandbox / "missing-source"),
+                },
+                None,
+                "existing real directory",
+            ),
+            (
+                "symlink-source",
+                {"version": 1, "skillsets_directory": str(source_link)},
+                None,
+                "existing real directory",
+            ),
+        )
+        for index, (label, value, raw, expected) in enumerate(cases):
+            with self.subTest(label=label):
+                home = self.new_home(f"invalid-config-{index}")
+                self.write_config(home, real_source, value, raw=raw)
+                before = self.tree_contract_snapshot(real_source)
+
+                result = self.run_cli("init", "default", home=home)
+
+                self.assert_refused(result)
+                self.assertIn(expected, result.stdout + result.stderr)
+                self.assertFalse(os.path.lexists(home / ".agents" / "skillsets"))
+                self.assertEqual(self.tree_contract_snapshot(real_source), before)
+
+        symlink_home = self.new_home("symlink-config")
+        symlink_root = symlink_home / ".agents"
+        symlink_root.mkdir()
+        external_config = self.sandbox / "external-config.json"
+        external_config.write_text(
+            json.dumps(
+                {"version": 1, "skillsets_directory": str(real_source)}
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (symlink_root / "config.json").symlink_to(external_config)
+
+        result = self.run_cli("init", "default", home=symlink_home)
+
+        self.assert_refused(result)
+        self.assertIn("config must be a real regular file", result.stdout + result.stderr)
+        self.assertFalse(os.path.lexists(symlink_root / "skillsets"))
+
+        nested_home = self.new_home("nested-config-source")
+        nested_source = nested_home / ".agents" / "external"
+        nested_source.mkdir(parents=True)
+        self.write_config(nested_home, nested_source)
+
+        result = self.run_cli("init", "default", home=nested_home)
+
+        self.assert_refused(result)
+        self.assertIn(
+            "configured skillsets directory must be outside the managed root",
+            result.stdout + result.stderr,
+        )
+        self.assertFalse(os.path.lexists(nested_home / ".agents" / "skillsets"))
+
+        linked_parent_home = self.new_home("linked-parent-config-source")
+        linked_parent_root = linked_parent_home / ".agents"
+        nested_source = linked_parent_root / "external"
+        nested_source.mkdir(parents=True)
+        root_alias = self.sandbox / "managed-root-alias"
+        root_alias.symlink_to(linked_parent_root, target_is_directory=True)
+        linked_source = root_alias / "external"
+        self.write_config(linked_parent_home, linked_source)
+
+        result = self.run_cli("init", "default", home=linked_parent_home)
+
+        self.assert_refused(result)
+        self.assertIn(
+            "configured skillsets directory must resolve outside the managed root",
+            result.stdout + result.stderr,
+        )
+        self.assertFalse(os.path.lexists(linked_parent_root / "skillsets"))
+        self.assertFalse(os.path.lexists(nested_source / "default"))
+
+    def test_configured_init_rolls_back_owned_link_and_set_after_interruptions(self):
+        for index, failure_point in enumerate(("skillsets-link", "initial-set")):
+            with self.subTest(failure_point=failure_point):
+                home = self.new_home(f"configured-rollback-{index}")
+                root = home / ".agents"
+                external = self.sandbox / f"rollback-source-{index}"
+                external.mkdir()
+                unrelated = external / "unrelated"
+                (unrelated / "skills").mkdir(parents=True)
+                self.write_lock(unrelated / ".skill-lock.json")
+                marker = unrelated / "skills" / "keep"
+                marker.write_bytes(b"preserve")
+                self.write_config(home, external)
+                (root / "skills" / "alpha").mkdir(parents=True)
+                payload = b"original skill\n"
+                (root / "skills" / "alpha" / "SKILL.md").write_bytes(payload)
+                lock_bytes = b'{"version": 3, "skills": {}, "dismissed": {}}\n'
+                (root / ".skill-lock.json").write_bytes(lock_bytes)
+                if failure_point == "skillsets-link":
+                    fault = self.fault_environment(
+                        f"""
+                        import os
+                        destination = {str(root / 'skillsets')!r}
+                        original_symlink = os.symlink
+                        def interrupt_after_link(source, target, *args, **kwargs):
+                            result = original_symlink(source, target, *args, **kwargs)
+                            if os.path.abspath(os.fspath(target)) == destination:
+                                raise KeyboardInterrupt
+                            return result
+                        os.symlink = interrupt_after_link
+                        """
+                    )
+                else:
+                    fault = self.fault_environment(
+                        f"""
+                        import os
+                        from pathlib import Path
+                        destination = {str(external / 'default')!r}
+                        original_mkdir = Path.mkdir
+                        def interrupt_after_set(path, *args, **kwargs):
+                            result = original_mkdir(path, *args, **kwargs)
+                            if os.path.abspath(os.fspath(path)) == destination:
+                                raise KeyboardInterrupt
+                            return result
+                        Path.mkdir = interrupt_after_set
+                        """
+                    )
+
+                result = self.run_cli(
+                    "init", "default", home=home, extra_environment=fault
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(os.path.lexists(root / "skillsets"))
+                self.assertFalse(os.path.lexists(root / "active"))
+                self.assertFalse((root / "skills").is_symlink())
+                self.assertEqual(
+                    (root / "skills" / "alpha" / "SKILL.md").read_bytes(), payload
+                )
+                self.assertFalse((root / ".skill-lock.json").is_symlink())
+                self.assertEqual((root / ".skill-lock.json").read_bytes(), lock_bytes)
+                self.assertFalse(os.path.lexists(external / "default"))
+                self.assertEqual(marker.read_bytes(), b"preserve")
+                self.assertTrue(external.is_dir())
+
+    def test_configured_init_rollback_never_traverses_a_replaced_link(self):
+        external = self.sandbox / "rollback-replaced-link-source"
+        victim = self.sandbox / "rollback-replaced-link-victim"
+        external.mkdir()
+        victim.mkdir()
+        victim_root = self.sandbox / "rollback-replaced-link-victim-view"
+        victim_root.mkdir()
+        (victim_root / "skillsets").symlink_to(victim, target_is_directory=True)
+        victim_set = self.make_set(victim_root, "default")
+        payload = victim_set / "skills" / "keep"
+        payload.write_bytes(b"victim data")
+        self.write_config(self.home, external)
+        link = self.root / "skillsets"
+        fault = self.fault_environment(
+            f"""
+            import os
+            from pathlib import Path
+            link = Path({str(link)!r})
+            victim = {str(victim)!r}
+            original_symlink = os.symlink
+            def replace_after_link(source, target, *args, **kwargs):
+                result = original_symlink(source, target, *args, **kwargs)
+                if Path(target) == link:
+                    link.unlink()
+                    original_symlink(victim, link)
+                    raise KeyboardInterrupt
+                return result
+            os.symlink = replace_after_link
+            """
+        )
+
+        result = self.run_cli("init", "default", extra_environment=fault)
+
+        self.assert_refused(result)
+        self.assertIn("rollback was incomplete", result.stdout + result.stderr)
+        self.assertEqual(payload.read_bytes(), b"victim data")
+        self.assertFalse(os.path.lexists(external / "default"))
+        self.assertEqual(os.readlink(link), str(victim))
+
+    def test_configured_init_refuses_a_link_replaced_after_creation(self):
+        external = self.sandbox / "init-replaced-link-source"
+        victim = self.sandbox / "init-replaced-link-victim"
+        external.mkdir()
+        victim.mkdir()
+        victim_root = self.sandbox / "init-replaced-link-victim-view"
+        victim_root.mkdir()
+        (victim_root / "skillsets").symlink_to(victim, target_is_directory=True)
+        victim_set = self.make_set(victim_root, "default")
+        payload = victim_set / "skills" / "keep"
+        payload.write_bytes(b"victim data")
+        self.write_config(self.home, external)
+        link = self.root / "skillsets"
+        fault = self.fault_environment(
+            f"""
+            import os
+            from pathlib import Path
+            link = Path({str(link)!r})
+            victim = {str(victim)!r}
+            original_symlink = os.symlink
+            def replace_after_link(source, target, *args, **kwargs):
+                result = original_symlink(source, target, *args, **kwargs)
+                if Path(target) == link:
+                    link.unlink()
+                    original_symlink(victim, link)
+                return result
+            os.symlink = replace_after_link
+            """
+        )
+
+        result = self.run_cli("init", "default", extra_environment=fault)
+
+        self.assert_refused(result)
+        self.assertIn(
+            "configured skillsets link is noncanonical",
+            result.stdout + result.stderr,
+        )
+        self.assertIn("rollback was incomplete", result.stdout + result.stderr)
+        self.assertEqual(payload.read_bytes(), b"victim data")
+        self.assertFalse(os.path.lexists(external / "default"))
+        self.assertEqual(os.readlink(link), str(victim))
+        self.assertFalse(os.path.lexists(self.root / "active"))
+        self.assertFalse(os.path.lexists(self.root / "skills"))
+        self.assertFalse(os.path.lexists(self.root / ".skill-lock.json"))
+
+    def test_configured_init_refuses_a_link_replaced_during_alias_creation(self):
+        external = self.sandbox / "init-alias-replaced-link-source"
+        victim = self.sandbox / "init-alias-replaced-link-victim"
+        external.mkdir()
+        victim.mkdir()
+        victim_root = self.sandbox / "init-alias-replaced-link-victim-view"
+        victim_root.mkdir()
+        (victim_root / "skillsets").symlink_to(victim, target_is_directory=True)
+        victim_set = self.make_set(victim_root, "default")
+        payload = victim_set / "skills" / "keep"
+        payload.write_bytes(b"victim data")
+        self.write_config(self.home, external)
+        link = self.root / "skillsets"
+        active = self.root / "active"
+        fault = self.fault_environment(
+            f"""
+            import os
+            from pathlib import Path
+            link = Path({str(link)!r})
+            active = Path({str(active)!r})
+            victim = {str(victim)!r}
+            original_symlink = os.symlink
+            def replace_during_aliases(source, target, *args, **kwargs):
+                result = original_symlink(source, target, *args, **kwargs)
+                if Path(target) == active:
+                    link.unlink()
+                    original_symlink(victim, link)
+                return result
+            os.symlink = replace_during_aliases
+            """
+        )
+
+        result = self.run_cli("init", "default", extra_environment=fault)
+
+        self.assert_refused(result)
+        self.assertIn(
+            "configured skillsets link is noncanonical",
+            result.stdout + result.stderr,
+        )
+        self.assertIn("rollback was incomplete", result.stdout + result.stderr)
+        self.assertEqual(payload.read_bytes(), b"victim data")
+        self.assertFalse(os.path.lexists(external / "default"))
+        self.assertEqual(os.readlink(link), str(victim))
+        self.assertFalse(os.path.lexists(self.root / "active"))
+        self.assertFalse(os.path.lexists(self.root / "skills"))
+        self.assertFalse(os.path.lexists(self.root / ".skill-lock.json"))
 
     def test_init_adopts_existing_skills_and_version_three_lock_without_rewriting(self):
         source_skills = self.root / "skills"
