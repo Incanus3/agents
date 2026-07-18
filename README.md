@@ -6,6 +6,10 @@ symlinks. Collections can be upstream-managed or explicitly hand-managed. The
 Linux-only CLI provides lifecycle, inspection, and diagnostic commands plus
 managed delegation to the upstream `skills` CLI.
 
+<p align="center">
+  <img src="agents.png" alt="Pixel-art agent in front of blue terminal code" width="320">
+</p>
+
 ## Requirements and PATH
 
 The CLI requires Linux and Python 3 and uses only the Python standard library.
