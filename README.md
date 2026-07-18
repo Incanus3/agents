@@ -515,8 +515,9 @@ Claude Code may need a session restart when a top-level skills directory is
 created after the session starts. Changes inside an already watched skill
 directory are normally visible through the live link.
 
-Rename and removal refuse globally registered Claude Code skillsets, including
-malformed registration state that cannot safely be classified. Local
+Rename and removal operations refuse globally registered Claude Code
+skillsets, including malformed registration state that cannot safely be
+classified. Local
 registrations are not indexed globally, so disable every known local
 registration before renaming or removing its source set.
 
