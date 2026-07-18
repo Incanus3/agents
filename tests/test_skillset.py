@@ -1016,6 +1016,171 @@ _skillset'''
         self.assertEqual(self.filesystem_snapshot(configured), configured_before)
         self.assertEqual(self.filesystem_snapshot(mismatched), mismatched_before)
 
+    def test_doctor_rejects_structurally_invalid_configured_links_without_source_access(
+        self,
+    ):
+        external = self.sandbox / "configured-link-structure-source"
+        default = external / "default"
+        (default / "skills").mkdir(parents=True)
+        self.write_lock(default / ".skill-lock.json")
+        source_prefix = str(external) + os.sep
+        cases = (
+            ("missing", None, "configured skillsets link is missing"),
+            ("directory", "directory", "configured skillsets link must be a symlink"),
+            ("file", "file", "configured skillsets link must be a symlink"),
+        )
+
+        for index, (label, entry_kind, expected) in enumerate(cases):
+            with self.subTest(label=label):
+                home = self.new_home(f"configured-link-structure-{index}")
+                root = home / ".agents"
+                self.write_config(home, external)
+                (root / ".skillset.lock").write_text("", encoding="utf-8")
+                skillsets = root / "skillsets"
+                if entry_kind == "directory":
+                    skillsets.mkdir()
+                elif entry_kind == "file":
+                    skillsets.write_text("not a link\n", encoding="utf-8")
+                (root / "active").symlink_to("skillsets/default")
+                (root / "skills").symlink_to("active/skills")
+                (root / ".skill-lock.json").symlink_to("active/.skill-lock.json")
+
+                descendant_accessed = (
+                    self.sandbox / f"configured-structure-descendant-{index}"
+                )
+                fault = self.fault_environment(
+                    f"""
+                    import os
+                    from pathlib import Path
+                    marker = Path({str(descendant_accessed)!r})
+                    source = {str(external)!r}
+                    source_prefix = {source_prefix!r}
+                    original_lstat = os.lstat
+                    original_iterdir = Path.iterdir
+                    def guarded_lstat(path, *args, **kwargs):
+                        candidate = os.fsdecode(os.fspath(path))
+                        if candidate.startswith(source_prefix):
+                            marker.write_text(candidate, encoding="utf-8")
+                        return original_lstat(path, *args, **kwargs)
+                    def guarded_iterdir(path, *args, **kwargs):
+                        candidate = os.fsdecode(os.fspath(path))
+                        if candidate == source:
+                            marker.write_text(candidate, encoding="utf-8")
+                        return original_iterdir(path, *args, **kwargs)
+                    os.lstat = guarded_lstat
+                    Path.iterdir = guarded_iterdir
+                    """
+                )
+                home_before = self.filesystem_snapshot(home)
+                external_before = self.filesystem_snapshot(external)
+
+                result = self.run_cli(
+                    "doctor", home=home, extra_environment=fault
+                )
+
+                self.assert_refused(result)
+                errors = self.doctor_findings(result, "error")
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(expected, errors[0])
+                self.assertEqual(self.doctor_findings(result, "warning"), [])
+                self.assertFalse(
+                    descendant_accessed.exists(),
+                    "doctor inspected the configured source after link rejection",
+                )
+                self.assertEqual(self.filesystem_snapshot(home), home_before)
+                self.assertEqual(
+                    self.filesystem_snapshot(external), external_before
+                )
+
+    def test_doctor_reports_configured_link_permission_failures_without_source_access(
+        self,
+    ):
+        external = self.sandbox / "configured-link-permission-source"
+        default = external / "default"
+        (default / "skills").mkdir(parents=True)
+        self.write_lock(default / ".skill-lock.json")
+        source_prefix = str(external) + os.sep
+        cases = (
+            ("lstat", "could not inspect skillsets directory"),
+            ("readlink", "could not read configured skillsets link"),
+        )
+
+        for index, (failure, expected) in enumerate(cases):
+            with self.subTest(failure=failure):
+                home = self.new_home(f"configured-link-permission-{index}")
+                root = home / ".agents"
+                self.write_config(home, external)
+                (root / ".skillset.lock").write_text("", encoding="utf-8")
+                skillsets = root / "skillsets"
+                skillsets.symlink_to(external, target_is_directory=True)
+                (root / "active").symlink_to("skillsets/default")
+                (root / "skills").symlink_to("active/skills")
+                (root / ".skill-lock.json").symlink_to("active/.skill-lock.json")
+
+                descendant_accessed = (
+                    self.sandbox / f"configured-permission-descendant-{index}"
+                )
+                fault = self.fault_environment(
+                    f"""
+                    import errno
+                    import os
+                    from pathlib import Path
+                    failure = {failure!r}
+                    marker = Path({str(descendant_accessed)!r})
+                    link = {str(skillsets)!r}
+                    source = {str(external)!r}
+                    source_prefix = {source_prefix!r}
+                    original_lstat = os.lstat
+                    original_readlink = os.readlink
+                    original_iterdir = Path.iterdir
+                    def guarded_lstat(path, *args, **kwargs):
+                        candidate = os.fsdecode(os.fspath(path))
+                        if candidate == link and failure == "lstat":
+                            raise PermissionError(
+                                errno.EACCES, os.strerror(errno.EACCES), candidate
+                            )
+                        if candidate.startswith(source_prefix):
+                            marker.write_text(candidate, encoding="utf-8")
+                        return original_lstat(path, *args, **kwargs)
+                    def guarded_readlink(path, *args, **kwargs):
+                        candidate = os.fsdecode(os.fspath(path))
+                        if candidate == link and failure == "readlink":
+                            raise PermissionError(
+                                errno.EACCES, os.strerror(errno.EACCES), candidate
+                            )
+                        return original_readlink(path, *args, **kwargs)
+                    def guarded_iterdir(path, *args, **kwargs):
+                        candidate = os.fsdecode(os.fspath(path))
+                        if candidate == source:
+                            marker.write_text(candidate, encoding="utf-8")
+                        return original_iterdir(path, *args, **kwargs)
+                    os.lstat = guarded_lstat
+                    os.readlink = guarded_readlink
+                    Path.iterdir = guarded_iterdir
+                    """
+                )
+                home_before = self.filesystem_snapshot(home)
+                external_before = self.filesystem_snapshot(external)
+
+                result = self.run_cli(
+                    "doctor", home=home, extra_environment=fault
+                )
+
+                self.assert_refused(result)
+                errors = self.doctor_findings(result, "error")
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(expected, errors[0])
+                self.assertIn("Permission denied", errors[0])
+                self.assertEqual(self.doctor_findings(result, "warning"), [])
+                self.assertFalse(
+                    descendant_accessed.exists(),
+                    "doctor inspected the configured source after permission failure",
+                )
+                self.assertEqual(self.filesystem_snapshot(home), home_before)
+                self.assertEqual(
+                    self.filesystem_snapshot(external), external_before
+                )
+
     def test_doctor_rejects_invalid_config_before_skillsets_descendant_access(self):
         external = self.sandbox / "invalid-config-doctor-source"
         default = external / "default"
