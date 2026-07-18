@@ -52,6 +52,9 @@ and it must name an existing real directory rather than a symlink. The
 configured directory contains the named set directories (`default/`, `work/`,
 and so on), not one flat collection of skills. Configuration does not permit
 symlinked sets, `skills/` directories, or individual skill directories.
+Use a dedicated directory inside the Git repository, not the repository root;
+otherwise repository metadata such as `.git` is treated as a named skillset and
+makes the configured layout invalid.
 
 On a fresh installation, write the config before initialization:
 
