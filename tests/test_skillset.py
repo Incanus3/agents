@@ -2937,13 +2937,20 @@ _skillset'''
                 fault = self.fault_environment(f"""
                     import os
                     original_lstat = os.lstat
-                    def refuse_registration_inspection(path, *args, **kwargs):
+                    original_stat = os.stat
+                    def refuse_registration_inspection(path):
                         if os.fspath(path) == {str(inaccessible)!r}:
                             raise PermissionError(
                                 13, "Permission denied", os.fspath(path)
                             )
+                    def refuse_lstat(path, *args, **kwargs):
+                        refuse_registration_inspection(path)
                         return original_lstat(path, *args, **kwargs)
-                    os.lstat = refuse_registration_inspection
+                    def refuse_stat(path, *args, **kwargs):
+                        refuse_registration_inspection(path)
+                        return original_stat(path, *args, **kwargs)
+                    os.lstat = refuse_lstat
+                    os.stat = refuse_stat
                 """)
                 for arguments in (
                     ("rename", "personal", "renamed"),
