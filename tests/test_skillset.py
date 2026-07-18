@@ -404,6 +404,7 @@ class SkillsetTests(unittest.TestCase):
                 "rename",
                 "remove",
                 "codex",
+                "claude",
                 "skills",
                 "list",
                 "current",
@@ -445,7 +446,8 @@ class SkillsetTests(unittest.TestCase):
     def test_completion_scripts_include_the_complete_wrapper_grammar(self):
         commands = (
             "init", "create", "use", "rename", "remove", "list",
-            "codex", "current", "show", "doctor", "skills", "completions",
+            "codex", "claude", "current", "show", "doctor", "skills",
+            "completions",
         )
         for shell in ("bash", "zsh", "fish"):
             with self.subTest(shell=shell):
@@ -475,13 +477,13 @@ class SkillsetTests(unittest.TestCase):
         outer_parser, nested_parsers = script.split('case "${words[1]}" in', 1)
         self.assertIn("_arguments -S -C \\", outer_parser)
         self.assertEqual(outer_parser.count("_arguments"), 1)
-        self.assertEqual(nested_parsers.count("_arguments"), 12)
-        self.assertEqual(nested_parsers.count("_arguments -S"), 12)
-        self.assertEqual(script.count("_arguments"), 13)
-        self.assertEqual(script.count("_arguments -S"), 13)
+        self.assertEqual(nested_parsers.count("_arguments"), 14)
+        self.assertEqual(nested_parsers.count("_arguments -S"), 14)
+        self.assertEqual(script.count("_arguments"), 15)
+        self.assertEqual(script.count("_arguments -S"), 15)
         self.assertEqual(script.count("_arguments -S -C"), 1)
         self.assertIn('-A "-*"', outer_parser)
-        self.assertEqual(nested_parsers.count("&& return 0"), 12)
+        self.assertEqual(nested_parsers.count("&& return 0"), 14)
         self.assertIn("skills) return 0 ;;", script)
         self.assertIn(
             'if [[ "${zsh_eval_context[-1]}" == loadautofunc ]]; then',
@@ -527,7 +529,15 @@ printf 'codex-enable:%s\n' "${COMPREPLY[*]}"
 COMP_WORDS=(skillset codex enable --local d); COMP_CWORD=4; _skillset_completion
 printf 'codex-local-enable:%s\n' "${COMPREPLY[*]}"
 COMP_WORDS=(skillset codex list --v); COMP_CWORD=3; _skillset_completion
-printf 'codex-list:%s\n' "${COMPREPLY[*]}"'''
+printf 'codex-list:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(skillset claude e); COMP_CWORD=2; _skillset_completion
+printf 'claude-command:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(skillset claude enable --local d); COMP_CWORD=4; _skillset_completion
+printf 'claude-local-enable:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(skillset claude enable -- ""); COMP_CWORD=4; _skillset_completion
+printf 'claude-terminator:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(skillset claude list --v); COMP_CWORD=3; _skillset_completion
+printf 'claude-list:%s\n' "${COMPREPLY[*]}"'''
         result = subprocess.run(
             [bash, "-c", probe, "bash", str(script)],
             env=environment,
@@ -545,7 +555,9 @@ printf 'codex-list:%s\n' "${COMPREPLY[*]}"'''
                 "from-separated:default demo", "new:0",
                 "terminator:0", "skills:0", "codex-command:enable",
                 "codex-enable:default demo", "codex-local-enable:default demo",
-                "codex-list:--verbose",
+                "codex-list:--verbose", "claude-command:enable",
+                "claude-local-enable:default demo",
+                "claude-terminator:default demo", "claude-list:--verbose",
             ],
         )
 
@@ -583,6 +595,9 @@ printf 'codex-list:%s\n' "${COMPREPLY[*]}"'''
         self.assertEqual(candidates("skillset codex e"), ["enable"])
         self.assertEqual(candidates("skillset codex enable d"), ["default", "demo"])
         self.assertEqual(candidates("skillset codex list --v"), ["--verbose"])
+        self.assertEqual(candidates("skillset claude e"), ["enable"])
+        self.assertEqual(candidates("skillset claude enable d"), ["default", "demo"])
+        self.assertEqual(candidates("skillset claude list --v"), ["--verbose"])
 
     def test_completion_name_lookup_discards_stdout_on_failure(self):
         stub_directory = self.sandbox / "failed-list-bin"
@@ -1878,6 +1893,1073 @@ _skillset'''
         self.assert_refused(removed)
         self.assertEqual(self.filesystem_snapshot(self.home), before)
 
+    def test_claude_global_enable_flattens_skills_and_registers_the_set(self):
+        self.initialize()
+        personal = self.make_manual_set(self.root, "personal")
+        skills = personal / "skills"
+        alpha = self.write_skill(skills, "alpha-directory", """
+            name: alpha
+            description: Alpha skill
+        """)
+        malformed = skills / "malformed"
+        malformed.mkdir()
+        (skills / "ignored.txt").write_text("not a skill directory\n")
+
+        enabled = self.run_cli("claude", "enable", "personal")
+        listed = self.run_cli("claude", "list")
+        verbose = self.run_cli("claude", "list", "--verbose")
+
+        claude = self.home / ".claude"
+        registration = claude / ".skillsets" / "personal"
+        alpha_link = claude / "skills" / "alpha-directory"
+        malformed_link = claude / "skills" / "malformed"
+        self.assertEqual(enabled.returncode, 0, enabled.stderr)
+        self.assertEqual(os.readlink(registration), str(skills))
+        self.assertEqual(os.readlink(alpha_link), str(alpha))
+        self.assertEqual(os.readlink(malformed_link), str(malformed))
+        self.assertFalse(os.path.lexists(claude / "skills" / "personal"))
+        self.assertFalse(os.path.lexists(claude / "skills" / "ignored.txt"))
+        self.assertEqual(listed.stdout, "[g] personal [m]\n")
+        self.assertIn("[g] personal [m]", verbose.stdout)
+        self.assertIn("alpha", verbose.stdout)
+        self.assertIn("malformed [invalid: missing SKILL.md]", verbose.stdout)
+
+    def test_claude_local_enable_is_exact_scoped_idempotent_and_reconciles(self):
+        self.initialize()
+        personal = self.make_set(self.root, "personal")
+        skills = personal / "skills"
+        alpha = self.write_skill(skills, "alpha", """
+            name: alpha
+            description: Alpha
+        """)
+        beta = self.write_skill(skills, "beta", """
+            name: beta
+            description: Beta
+        """)
+        project = self.sandbox / "project-claude"
+        project.mkdir()
+
+        first = self.run_cli("claude", "enable", "personal", "-l", cwd=project)
+        local = project / ".claude"
+        registration = local / ".skillsets" / "personal"
+        alpha_link = local / "skills" / "alpha"
+        beta_link = local / "skills" / "beta"
+        identities = {
+            path: path.lstat().st_ino
+            for path in (registration, alpha_link, beta_link)
+        }
+        second = self.run_cli(
+            "claude", "enable", "--local", "personal", cwd=project
+        )
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(
+            {path: path.lstat().st_ino for path in identities}, identities
+        )
+        self.assertFalse((self.home / ".claude").exists())
+
+        gamma = self.write_skill(skills, "gamma", """
+            name: gamma
+            description: Gamma
+        """)
+        shutil.rmtree(beta)
+        reconciled = self.run_cli(
+            "claude", "enable", "personal", "--local", cwd=project
+        )
+        global_list = self.run_cli("claude", "list", "--global", cwd=project)
+        local_list = self.run_cli("claude", "list", "--local", cwd=project)
+        combined = self.run_cli("claude", "list", cwd=project)
+
+        self.assertEqual(reconciled.returncode, 0, reconciled.stderr)
+        self.assertEqual(os.readlink(alpha_link), str(alpha))
+        self.assertFalse(os.path.lexists(beta_link))
+        self.assertEqual(os.readlink(local / "skills" / "gamma"), str(gamma))
+        self.assertEqual(global_list.stdout, "")
+        self.assertEqual(local_list.stdout, "personal\n")
+        self.assertEqual(combined.stdout, "[l] personal\n")
+
+    def test_claude_lists_overlapping_global_and_local_registrations_and_deduplicates_home(self):
+        self.initialize()
+        source = self.root / "skillsets" / "default" / "skills"
+        self.write_skill(source, "alpha", "name: alpha\ndescription: Alpha")
+        project = self.sandbox / "claude-overlap"
+        project.mkdir()
+        self.assertEqual(
+            self.run_cli("claude", "enable", "default").returncode, 0
+        )
+        self.assertEqual(
+            self.run_cli(
+                "claude", "enable", "default", "--local", cwd=project
+            ).returncode,
+            0,
+        )
+
+        combined = self.run_cli("claude", "list", cwd=project)
+        from_home = self.run_cli("claude", "list", cwd=self.home)
+
+        self.assertEqual(
+            combined.stdout, "[g] default\n[l] default\n"
+        )
+        self.assertEqual(from_home.stdout, "[g] default\n")
+
+    def test_claude_combined_list_deduplicates_aliased_home(self):
+        physical_parent = self.sandbox / "claude-list-physical"
+        physical_home = physical_parent / "home"
+        physical_home.mkdir(parents=True)
+        alias_parent = self.sandbox / "claude-list-alias"
+        alias_parent.symlink_to(physical_parent, target_is_directory=True)
+        alias_home = alias_parent / "home"
+        root = self.initialize(home=alias_home)
+        source = root / "skillsets" / "default" / "skills"
+        self.write_skill(source, "alpha", "name: alpha\ndescription: Alpha")
+        enabled = self.run_cli(
+            "claude", "enable", "default", home=alias_home
+        )
+
+        listed = self.run_cli(
+            "claude", "list", home=alias_home, cwd=physical_home
+        )
+
+        self.assertEqual(enabled.returncode, 0, enabled.stderr)
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertEqual(listed.stdout, "[g] default\n")
+
+    def test_claude_enable_refuses_cross_scope_skill_name_collisions(self):
+        for index, first_scope in enumerate(("global", "local")):
+            with self.subTest(first_scope=first_scope):
+                home = self.new_home(f"claude-cross-scope-enable-{index}")
+                root = self.make_managed_layout(home)
+                (root / ".skillset.lock").touch()
+                global_source = root / "skillsets" / "default" / "skills"
+                local_source = self.make_set(root, "project") / "skills"
+                self.write_skill(
+                    global_source,
+                    "shared",
+                    "name: shared\ndescription: Global",
+                )
+                self.write_skill(
+                    local_source,
+                    "shared",
+                    "name: shared\ndescription: Local",
+                )
+                project = self.sandbox / f"claude-cross-scope-project-{index}"
+                project.mkdir()
+                if first_scope == "global":
+                    first = self.run_cli(
+                        "claude",
+                        "enable",
+                        "default",
+                        home=home,
+                        cwd=project,
+                    )
+                    before = self.filesystem_snapshot(home)
+                    refused = self.run_cli(
+                        "claude",
+                        "enable",
+                        "project",
+                        "--local",
+                        home=home,
+                        cwd=project,
+                    )
+                    self.assertFalse((project / ".claude").exists())
+                    self.assertEqual(
+                        self.filesystem_snapshot(home), before
+                    )
+                else:
+                    first = self.run_cli(
+                        "claude",
+                        "enable",
+                        "project",
+                        "--local",
+                        home=home,
+                        cwd=project,
+                    )
+                    before = self.filesystem_snapshot(project)
+                    refused = self.run_cli(
+                        "claude",
+                        "enable",
+                        "default",
+                        home=home,
+                        cwd=project,
+                    )
+                    self.assertFalse((home / ".claude").exists())
+                    self.assertEqual(
+                        self.filesystem_snapshot(project), before
+                    )
+
+                self.assertEqual(first.returncode, 0, first.stderr)
+                self.assert_refused(refused)
+                self.assertIn(
+                    "skill name 'shared' conflicts across global and local scopes",
+                    refused.stderr,
+                )
+
+    def test_claude_enable_rechecks_opposite_scope_created_during_sync(self):
+        for index, enabled_scope in enumerate(("global", "local")):
+            with self.subTest(enabled_scope=enabled_scope):
+                home = self.new_home(f"claude-cross-scope-race-{index}")
+                root = self.make_managed_layout(home)
+                (root / ".skillset.lock").touch()
+                source = root / "skillsets" / "default" / "skills"
+                self.write_skill(
+                    source,
+                    "shared",
+                    "name: shared\ndescription: Shared",
+                )
+                project = self.sandbox / f"claude-cross-scope-race-project-{index}"
+                project.mkdir()
+                opposite_skills = (
+                    project / ".claude" / "skills"
+                    if enabled_scope == "global"
+                    else home / ".claude" / "skills"
+                )
+                fault = self.fault_environment(f"""
+                    import os
+                    original_symlink = os.symlink
+                    created_collision = False
+                    def create_opposite_collision(target, name, *args, **kwargs):
+                        global created_collision
+                        result = original_symlink(target, name, *args, **kwargs)
+                        if not created_collision and name == "shared":
+                            os.makedirs({str(opposite_skills)!r})
+                            with open(
+                                {str(opposite_skills / "shared")!r},
+                                "w",
+                                encoding="utf-8",
+                            ) as collision:
+                                collision.write("keep\\n")
+                            created_collision = True
+                        return result
+                    os.symlink = create_opposite_collision
+                """)
+                arguments = ["claude", "enable", "default"]
+                if enabled_scope == "local":
+                    arguments.append("--local")
+
+                result = self.run_cli(
+                    *arguments,
+                    home=home,
+                    cwd=project,
+                    extra_environment=fault,
+                )
+
+                self.assert_refused(result)
+                self.assertIn(
+                    "skill name 'shared' conflicts across global and local scopes",
+                    result.stderr,
+                )
+                self.assertEqual(
+                    (opposite_skills / "shared").read_text(),
+                    "keep\n",
+                )
+
+    def test_claude_list_rejects_cross_scope_masking(self):
+        home = self.new_home("claude-cross-scope-list")
+        root = self.make_managed_layout(home)
+        (root / ".skillset.lock").touch()
+        global_source = root / "skillsets" / "default" / "skills"
+        local_source = self.make_set(root, "project") / "skills"
+        self.write_skill(
+            global_source,
+            "shared",
+            "name: shared\ndescription: Global",
+        )
+        self.write_skill(
+            local_source,
+            "shared",
+            "name: shared\ndescription: Local",
+        )
+        project = self.sandbox / "claude-cross-scope-list-project"
+        elsewhere = self.sandbox / "claude-cross-scope-list-elsewhere"
+        project.mkdir()
+        elsewhere.mkdir()
+        local_enabled = self.run_cli(
+            "claude",
+            "enable",
+            "project",
+            "--local",
+            home=home,
+            cwd=project,
+        )
+        global_enabled = self.run_cli(
+            "claude",
+            "enable",
+            "default",
+            home=home,
+            cwd=elsewhere,
+        )
+
+        self.assertEqual(local_enabled.returncode, 0, local_enabled.stderr)
+        self.assertEqual(global_enabled.returncode, 0, global_enabled.stderr)
+        for arguments in (
+            ("claude", "list"),
+            ("claude", "list", "--global"),
+            ("claude", "list", "--local"),
+        ):
+            with self.subTest(arguments=arguments):
+                listed = self.run_cli(
+                    *arguments,
+                    home=home,
+                    cwd=project,
+                )
+                self.assert_refused(listed)
+                self.assertEqual(listed.stdout, "")
+                self.assertIn(
+                    "skill name 'shared' conflicts across global and local scopes",
+                    listed.stderr,
+                )
+
+    def test_claude_enable_refuses_source_symlinks_and_collisions_before_mutation(self):
+        for index, collision_kind in enumerate(("file", "directory", "relative", "absolute")):
+            with self.subTest(collision=collision_kind):
+                home = self.new_home(f"claude-collision-{index}")
+                root = self.make_managed_layout(home)
+                (root / ".skillset.lock").touch()
+                source = root / "skillsets" / "default" / "skills"
+                self.write_skill(source, "alpha", """
+                    name: alpha
+                    description: Alpha
+                """)
+                claude_skills = home / ".claude" / "skills"
+                claude_skills.mkdir(parents=True)
+                collision = claude_skills / "alpha"
+                if collision_kind == "file":
+                    collision.write_text("keep\n")
+                elif collision_kind == "directory":
+                    collision.mkdir()
+                elif collision_kind == "relative":
+                    collision.symlink_to("../somewhere")
+                else:
+                    collision.symlink_to("/tmp/unrelated")
+                before = self.filesystem_snapshot(home)
+
+                result = self.run_cli("claude", "enable", "default", home=home)
+
+                self.assert_refused(result)
+                self.assertEqual(self.filesystem_snapshot(home), before)
+                self.assertFalse(
+                    os.path.lexists(home / ".claude" / ".skillsets" / "default")
+                )
+
+        home = self.new_home("claude-source-symlink")
+        root = self.make_managed_layout(home)
+        (root / ".skillset.lock").touch()
+        source = root / "skillsets" / "default" / "skills"
+        (source / "linked").symlink_to(self.sandbox)
+        before = self.filesystem_snapshot(home)
+
+        result = self.run_cli("claude", "enable", "default", home=home)
+
+        self.assert_refused(result)
+        self.assertIn("must not be a symlink", result.stderr)
+        self.assertEqual(self.filesystem_snapshot(home), before)
+        self.assertFalse((home / ".claude").exists())
+
+    def test_claude_local_enable_refuses_projection_roots_inside_source(self):
+        for index, nested in enumerate((False, True)):
+            with self.subTest(nested=nested):
+                home = self.new_home(f"claude-source-overlap-{index}")
+                root = self.make_managed_layout(home)
+                (root / ".skillset.lock").touch()
+                source = root / "skillsets" / "default" / "skills"
+                alpha = self.write_skill(source, "alpha", """
+                    name: alpha
+                    description: Alpha
+                """)
+                working_directory = alpha if nested else source
+                before = self.filesystem_snapshot(home)
+
+                result = self.run_cli(
+                    "claude",
+                    "enable",
+                    "default",
+                    "--local",
+                    home=home,
+                    cwd=working_directory,
+                )
+
+                self.assert_refused(result)
+                self.assertIn(
+                    "local projection must not be rooted inside its skill source",
+                    result.stderr,
+                )
+                self.assertEqual(self.filesystem_snapshot(home), before)
+                self.assertFalse(
+                    os.path.lexists(working_directory / ".claude")
+                )
+
+        physical_parent = self.sandbox / "claude-source-physical"
+        physical_home = physical_parent / "home"
+        physical_home.mkdir(parents=True)
+        alias_parent = self.sandbox / "claude-source-alias"
+        alias_parent.symlink_to(physical_parent, target_is_directory=True)
+        alias_home = alias_parent / "home"
+        root = self.make_managed_layout(physical_home)
+        (root / ".skillset.lock").touch()
+        source = root / "skillsets" / "default" / "skills"
+        self.write_skill(
+            source,
+            "alpha",
+            "name: alpha\ndescription: Alpha",
+        )
+        before = self.filesystem_snapshot(physical_home)
+
+        result = self.run_cli(
+            "claude",
+            "enable",
+            "default",
+            "--local",
+            home=alias_home,
+            cwd=source,
+        )
+
+        self.assert_refused(result)
+        self.assertIn(
+            "local projection must not be rooted inside its skill source",
+            result.stderr,
+        )
+        self.assertEqual(self.filesystem_snapshot(physical_home), before)
+        self.assertFalse(os.path.lexists(source / ".claude"))
+
+    def test_claude_enable_revalidates_public_directory_bindings(self):
+        for index, replaced_name in enumerate(
+            ("source", "projection", "registrations")
+        ):
+            with self.subTest(directory=replaced_name):
+                home = self.new_home(f"claude-binding-{index}")
+                root = self.make_managed_layout(home)
+                (root / ".skillset.lock").touch()
+                source = root / "skillsets" / "default" / "skills"
+                self.write_skill(
+                    source,
+                    "alpha",
+                    "name: alpha\ndescription: Alpha",
+                )
+                claude = home / ".claude"
+                paths = {
+                    "source": source,
+                    "projection": claude / "skills",
+                    "registrations": claude / ".skillsets",
+                }
+                replaced = paths[replaced_name]
+                detached = replaced.with_name(f"{replaced.name}.detached")
+                trigger = "alpha" if replaced_name == "projection" else "default"
+                fault = self.fault_environment(f"""
+                    import os
+                    original_symlink = os.symlink
+                    replaced = False
+                    def replace_directory_after_link(target, name, *args, **kwargs):
+                        global replaced
+                        result = original_symlink(target, name, *args, **kwargs)
+                        if (
+                            not replaced
+                            and name == {trigger!r}
+                            and kwargs.get("dir_fd") is not None
+                        ):
+                            os.rename({str(replaced)!r}, {str(detached)!r})
+                            os.mkdir({str(replaced)!r})
+                            replaced = True
+                        return result
+                    os.symlink = replace_directory_after_link
+                """)
+
+                result = self.run_cli(
+                    "claude",
+                    "enable",
+                    "default",
+                    home=home,
+                    extra_environment=fault,
+                )
+
+                self.assert_refused(result)
+                self.assertIn(
+                    "directory changed during synchronization",
+                    result.stderr,
+                )
+                self.assertTrue(detached.is_dir())
+
+                recovered = self.run_cli(
+                    "claude", "enable", "default", home=home
+                )
+                self.assertEqual(
+                    recovered.returncode, 0, recovered.stderr
+                )
+
+    def test_claude_ownership_requires_matching_basename_and_preserves_aliases(self):
+        self.initialize()
+        source = self.root / "skillsets" / "default" / "skills"
+        alpha = self.write_skill(source, "alpha", """
+            name: alpha
+            description: Alpha
+        """)
+        enabled = self.run_cli("claude", "enable", "default")
+        self.assertEqual(enabled.returncode, 0, enabled.stderr)
+        claude_skills = self.home / ".claude" / "skills"
+        alias = claude_skills / "alpha-alias"
+        alias.symlink_to(alpha)
+
+        shutil.rmtree(alpha)
+        reconciled = self.run_cli("claude", "enable", "default")
+        disabled = self.run_cli("claude", "disable", "default")
+
+        self.assertEqual(reconciled.returncode, 0, reconciled.stderr)
+        self.assertFalse(os.path.lexists(claude_skills / "alpha"))
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual(disabled.returncode, 0, disabled.stderr)
+        self.assertTrue(alias.is_symlink())
+        self.assertTrue((self.home / ".claude").is_dir())
+        self.assertTrue((self.home / ".claude" / ".skillsets").is_dir())
+        self.assertTrue(claude_skills.is_dir())
+
+    def test_claude_enable_adopts_only_exact_canonical_links(self):
+        self.initialize()
+        source = self.root / "skillsets" / "default" / "skills"
+        alpha = self.write_skill(source, "alpha", """
+            name: alpha
+            description: Alpha
+        """)
+        claude_skills = self.home / ".claude" / "skills"
+        claude_skills.mkdir(parents=True)
+        adopted = claude_skills / "alpha"
+        adopted.symlink_to(str(alpha) + "///")
+        inode = adopted.lstat().st_ino
+
+        enabled = self.run_cli("claude", "enable", "default")
+
+        self.assertEqual(enabled.returncode, 0, enabled.stderr)
+        self.assertEqual(adopted.lstat().st_ino, inode)
+        self.assertTrue(
+            (self.home / ".claude" / ".skillsets" / "default").is_symlink()
+        )
+
+        self.assertEqual(
+            self.run_cli("claude", "disable", "default").returncode, 0
+        )
+        interior = claude_skills / "alpha"
+        interior.symlink_to(str(source) + "/./alpha")
+        before = self.filesystem_snapshot(self.home)
+        refused = self.run_cli("claude", "enable", "default")
+        self.assert_refused(refused)
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_claude_skillsets_coexist_or_collide_by_direct_skill_name(self):
+        self.initialize()
+        first = self.make_set(self.root, "first") / "skills"
+        second = self.make_set(self.root, "second") / "skills"
+        self.write_skill(first, "alpha", "name: alpha\ndescription: Alpha")
+        self.write_skill(second, "beta", "name: beta\ndescription: Beta")
+        self.assertEqual(
+            self.run_cli("claude", "enable", "first").returncode, 0
+        )
+        self.assertEqual(
+            self.run_cli("claude", "enable", "second").returncode, 0
+        )
+        self.assertEqual(
+            self.run_cli("claude", "list").stdout,
+            "[g] first\n[g] second\n",
+        )
+
+        conflict = self.write_skill(second, "alpha", """
+            name: other-alpha
+            description: Conflicting directory name
+        """)
+        before = self.filesystem_snapshot(self.home / ".claude")
+        refused = self.run_cli("claude", "enable", "second")
+        self.assert_refused(refused)
+        self.assertEqual(
+            self.filesystem_snapshot(self.home / ".claude"), before
+        )
+        self.assertTrue(conflict.is_dir())
+
+    def test_claude_disable_recovers_dangling_links_after_source_removal(self):
+        self.initialize()
+        personal = self.make_set(self.root, "personal")
+        source = personal / "skills"
+        self.write_skill(source, "alpha", "name: alpha\ndescription: Alpha")
+        self.assertEqual(
+            self.run_cli("claude", "enable", "personal").returncode, 0
+        )
+        shutil.rmtree(personal)
+
+        disabled = self.run_cli("claude", "disable", "personal")
+
+        self.assertEqual(disabled.returncode, 0, disabled.stderr)
+        self.assertFalse(
+            os.path.lexists(self.home / ".claude" / "skills" / "alpha")
+        )
+        self.assertFalse(
+            os.path.lexists(
+                self.home / ".claude" / ".skillsets" / "personal"
+            )
+        )
+
+    def test_claude_interrupted_registration_creation_reports_and_recovers(self):
+        self.initialize()
+        source = self.root / "skillsets" / "default" / "skills"
+        self.write_skill(source, "alpha", "name: alpha\ndescription: Alpha")
+        target = str(source)
+        fault = self.fault_environment(f"""
+            import os
+            original_symlink = os.symlink
+            def interrupt_after_registration(target, name, *args, **kwargs):
+                result = original_symlink(target, name, *args, **kwargs)
+                if target == {target!r} and name == "default":
+                    raise KeyboardInterrupt()
+                return result
+            os.symlink = interrupt_after_registration
+        """)
+
+        interrupted = self.run_cli(
+            "claude", "enable", "default", extra_environment=fault
+        )
+
+        registration = self.home / ".claude" / ".skillsets" / "default"
+        projected = self.home / ".claude" / "skills" / "alpha"
+        self.assertEqual(interrupted.returncode, 130, interrupted.stderr)
+        self.assertIn("link was created", interrupted.stderr)
+        self.assertIn("skillset claude enable default", interrupted.stderr)
+        self.assertTrue(registration.is_symlink())
+        self.assertFalse(os.path.lexists(projected))
+
+        recovered = self.run_cli("claude", "enable", "default")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertTrue(projected.is_symlink())
+
+    def test_claude_interrupted_scope_repair_reports_and_recovers(self):
+        self.initialize()
+        source = self.root / "skillsets" / "default" / "skills"
+        self.write_skill(source, "alpha", "name: alpha\ndescription: Alpha")
+        self.assertEqual(
+            self.run_cli("claude", "enable", "default").returncode, 0
+        )
+        claude = self.home / ".claude"
+        registration = claude / ".skillsets" / "default"
+        projection = claude / "skills"
+        shutil.rmtree(projection)
+        fault = self.fault_environment("""
+            import os
+            original_mkdir = os.mkdir
+            def interrupt_after_scope_repair(path, *args, **kwargs):
+                result = original_mkdir(path, *args, **kwargs)
+                if path == "skills" and kwargs.get("dir_fd") is not None:
+                    raise KeyboardInterrupt()
+                return result
+            os.mkdir = interrupt_after_scope_repair
+        """)
+
+        interrupted = self.run_cli(
+            "claude", "enable", "default", extra_environment=fault
+        )
+
+        self.assertEqual(interrupted.returncode, 130, interrupted.stderr)
+        self.assertIn(str(registration), interrupted.stderr)
+        self.assertIn(str(source), interrupted.stderr)
+        self.assertIn(str(projection), interrupted.stderr)
+        self.assertIn("skillset claude enable default", interrupted.stderr)
+        self.assertTrue(registration.is_symlink())
+        self.assertTrue(projection.is_dir())
+        self.assertFalse(os.path.lexists(projection / "alpha"))
+
+        recovered = self.run_cli("claude", "enable", "default")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertTrue((projection / "alpha").is_symlink())
+
+    def test_claude_interrupted_after_registration_reports_recovery_paths(self):
+        self.initialize()
+        source = self.root / "skillsets" / "default" / "skills"
+        self.write_skill(source, "alpha", "name: alpha\ndescription: Alpha")
+        fault = self.fault_environment("""
+            import os
+            original_stat = os.stat
+            source_checks = 0
+            def interrupt_during_source_verification(path, *args, **kwargs):
+                global source_checks
+                if (
+                    path == "alpha"
+                    and kwargs.get("dir_fd") is not None
+                    and kwargs.get("follow_symlinks") is False
+                ):
+                    source_checks += 1
+                    if source_checks == 2:
+                        raise KeyboardInterrupt()
+                return original_stat(path, *args, **kwargs)
+            os.stat = interrupt_during_source_verification
+        """)
+
+        interrupted = self.run_cli(
+            "claude", "enable", "default", extra_environment=fault
+        )
+
+        registration = self.home / ".claude" / ".skillsets" / "default"
+        projection = self.home / ".claude" / "skills"
+        self.assertEqual(interrupted.returncode, 130, interrupted.stderr)
+        self.assertIn(str(registration), interrupted.stderr)
+        self.assertIn(str(source), interrupted.stderr)
+        self.assertIn(str(projection), interrupted.stderr)
+        self.assertIn("skillset claude enable default", interrupted.stderr)
+        self.assertTrue(registration.is_symlink())
+        self.assertFalse(os.path.lexists(projection / "alpha"))
+
+        recovered = self.run_cli("claude", "enable", "default")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertTrue((projection / "alpha").is_symlink())
+
+    def test_claude_interrupted_projected_unlink_reports_and_recovers(self):
+        self.initialize()
+        source = self.root / "skillsets" / "default" / "skills"
+        self.write_skill(source, "alpha", "name: alpha\ndescription: Alpha")
+        self.assertEqual(
+            self.run_cli("claude", "enable", "default").returncode, 0
+        )
+        fault = self.fault_environment("""
+            import os
+            original_unlink = os.unlink
+            def interrupt_after_projected_unlink(name, *args, **kwargs):
+                result = original_unlink(name, *args, **kwargs)
+                if name == "alpha" and kwargs.get("dir_fd") is not None:
+                    raise KeyboardInterrupt()
+                return result
+            os.unlink = interrupt_after_projected_unlink
+        """)
+
+        interrupted = self.run_cli(
+            "claude", "disable", "default", extra_environment=fault
+        )
+
+        registration = self.home / ".claude" / ".skillsets" / "default"
+        projected = self.home / ".claude" / "skills" / "alpha"
+        self.assertEqual(interrupted.returncode, 130, interrupted.stderr)
+        self.assertIn("link was removed", interrupted.stderr)
+        self.assertIn("skillset claude disable default", interrupted.stderr)
+        self.assertFalse(os.path.lexists(projected))
+        self.assertTrue(registration.is_symlink())
+
+        recovered = self.run_cli("claude", "disable", "default")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertFalse(os.path.lexists(registration))
+
+    def test_claude_disable_interrupt_between_unlinks_reports_recovery(self):
+        self.initialize()
+        source = self.root / "skillsets" / "default" / "skills"
+        self.write_skill(source, "alpha", "name: alpha\ndescription: Alpha")
+        self.write_skill(source, "beta", "name: beta\ndescription: Beta")
+        self.assertEqual(
+            self.run_cli("claude", "enable", "default").returncode, 0
+        )
+        fault = self.fault_environment("""
+            import os
+            original_stat = os.stat
+            beta_checks = 0
+            def interrupt_before_second_unlink(path, *args, **kwargs):
+                global beta_checks
+                if (
+                    path == "beta"
+                    and kwargs.get("dir_fd") is not None
+                    and kwargs.get("follow_symlinks") is False
+                ):
+                    beta_checks += 1
+                    if beta_checks == 2:
+                        raise KeyboardInterrupt()
+                return original_stat(path, *args, **kwargs)
+            os.stat = interrupt_before_second_unlink
+        """)
+
+        interrupted = self.run_cli(
+            "claude", "disable", "default", extra_environment=fault
+        )
+
+        registration = self.home / ".claude" / ".skillsets" / "default"
+        projected = self.home / ".claude" / "skills"
+        self.assertEqual(interrupted.returncode, 130, interrupted.stderr)
+        self.assertIn(
+            "registration and projection may be incomplete",
+            interrupted.stderr,
+        )
+        self.assertIn("skillset claude disable default", interrupted.stderr)
+        self.assertFalse(os.path.lexists(projected / "alpha"))
+        self.assertTrue((projected / "beta").is_symlink())
+        self.assertTrue(registration.is_symlink())
+
+        recovered = self.run_cli("claude", "disable", "default")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertFalse(os.path.lexists(projected / "beta"))
+        self.assertFalse(os.path.lexists(registration))
+
+    def test_claude_projection_inspection_errors_never_hide_owned_links(self):
+        self.initialize()
+        source = self.root / "skillsets" / "default" / "skills"
+        self.write_skill(source, "alpha", "name: alpha\ndescription: Alpha")
+        self.assertEqual(
+            self.run_cli("claude", "enable", "default").returncode, 0
+        )
+        before = self.filesystem_snapshot(self.home)
+        faults = (
+            """
+            import os
+            original_stat = os.stat
+            def refuse_projected_stat(path, *args, **kwargs):
+                if (
+                    path == "alpha"
+                    and kwargs.get("dir_fd") is not None
+                    and kwargs.get("follow_symlinks") is False
+                ):
+                    raise PermissionError(13, "Permission denied", path)
+                return original_stat(path, *args, **kwargs)
+            os.stat = refuse_projected_stat
+            """,
+            """
+            import os
+            original_readlink = os.readlink
+            def refuse_projected_readlink(path, *args, **kwargs):
+                if path == "alpha" and kwargs.get("dir_fd") is not None:
+                    raise PermissionError(13, "Permission denied", path)
+                return original_readlink(path, *args, **kwargs)
+            os.readlink = refuse_projected_readlink
+            """,
+        )
+        for index, source_fault in enumerate(faults):
+            with self.subTest(inspection=index):
+                fault = self.fault_environment(source_fault)
+                result = self.run_cli(
+                    "claude", "disable", "default", extra_environment=fault
+                )
+                self.assert_refused(result)
+                self.assertIn(
+                    "could not inspect Claude Code entry 'alpha'",
+                    result.stderr,
+                )
+                self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+        readlink_fault = self.fault_environment(faults[1])
+        for arguments in (
+            ("claude", "enable", "default"),
+            ("claude", "list"),
+        ):
+            with self.subTest(command=arguments[1]):
+                result = self.run_cli(
+                    *arguments, extra_environment=readlink_fault
+                )
+                self.assert_refused(result)
+                self.assertIn(
+                    "could not inspect Claude Code entry 'alpha'",
+                    result.stderr,
+                )
+                self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_claude_disable_recovers_after_registration_unlink(self):
+        self.initialize()
+        source = self.root / "skillsets" / "default" / "skills"
+        self.write_skill(source, "alpha", "name: alpha\ndescription: Alpha")
+        registration = self.home / ".claude" / ".skillsets" / "default"
+        projected = self.home / ".claude" / "skills" / "alpha"
+
+        self.assertEqual(
+            self.run_cli("claude", "enable", "default").returncode, 0
+        )
+        interrupt = self.fault_environment("""
+            import os
+            original_unlink = os.unlink
+            def interrupt_after_registration_unlink(name, *args, **kwargs):
+                result = original_unlink(name, *args, **kwargs)
+                if name == "default" and kwargs.get("dir_fd") is not None:
+                    raise KeyboardInterrupt()
+                return result
+            os.unlink = interrupt_after_registration_unlink
+        """)
+        interrupted = self.run_cli(
+            "claude", "disable", "default", extra_environment=interrupt
+        )
+
+        self.assertEqual(interrupted.returncode, 130, interrupted.stderr)
+        self.assertIn("link was removed", interrupted.stderr)
+        self.assertIn("skillset claude disable default", interrupted.stderr)
+        self.assertFalse(os.path.lexists(projected))
+        self.assertFalse(os.path.lexists(registration))
+        recovered = self.run_cli("claude", "disable", "default")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+
+        self.assertEqual(
+            self.run_cli("claude", "enable", "default").returncode, 0
+        )
+        verification_failure = self.fault_environment("""
+            import os
+            original_listdir = os.listdir
+            projection_checks = 0
+            def fail_final_projection_check(path):
+                global projection_checks
+                if isinstance(path, int):
+                    projection_checks += 1
+                    if projection_checks == 2:
+                        raise OSError(5, "Input/output error")
+                return original_listdir(path)
+            os.listdir = fail_final_projection_check
+        """)
+        failed = self.run_cli(
+            "claude",
+            "disable",
+            "default",
+            extra_environment=verification_failure,
+        )
+
+        self.assert_refused(failed)
+        self.assertIn("skillset claude disable default", failed.stderr)
+        self.assertFalse(os.path.lexists(projected))
+        self.assertFalse(os.path.lexists(registration))
+        recovered = self.run_cli("claude", "disable", "default")
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+
+    def test_claude_list_reports_recognized_broken_registrations_without_mutation(self):
+        self.initialize()
+        registrations = self.home / ".claude" / ".skillsets"
+        registrations.mkdir(parents=True)
+        (registrations / "default").symlink_to("/tmp/noncanonical")
+        (registrations / "Not-Ours").write_text("ignored\n")
+        before = self.filesystem_snapshot(self.home)
+
+        result = self.run_cli("claude", "list")
+
+        self.assert_refused(result)
+        self.assertIn("noncanonical Claude Code registration", result.stderr)
+        self.assertIn(str(registrations / "default"), result.stderr)
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_claude_global_registration_and_malformed_containers_block_lifecycle(self):
+        self.initialize()
+        self.make_set(self.root, "personal")
+        self.assertEqual(
+            self.run_cli("claude", "enable", "personal").returncode, 0
+        )
+        before = self.filesystem_snapshot(self.home)
+        for arguments in (
+            ("rename", "personal", "renamed"),
+            ("remove", "personal", "--yes"),
+        ):
+            result = self.run_cli(*arguments)
+            self.assert_refused(result)
+            self.assertIn("Claude Code-enabled", result.stderr)
+            self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+        self.assertEqual(
+            self.run_cli("claude", "disable", "personal").returncode, 0
+        )
+        shutil.rmtree(self.home / ".claude")
+        (self.home / ".claude").symlink_to(self.sandbox)
+        before = self.filesystem_snapshot(self.home)
+        blocked = self.run_cli("rename", "personal", "renamed")
+        self.assert_refused(blocked)
+        self.assertIn("cannot be verified", blocked.stderr)
+        self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_malformed_exact_name_claude_registrations_require_repair(self):
+        self.initialize()
+        registrations = self.home / ".claude" / ".skillsets"
+        registrations.mkdir(parents=True)
+        cases = {
+            "regular-file": lambda path: path.write_text("not a link\n"),
+            "directory": lambda path: path.mkdir(),
+            "wrong-target-link": lambda path: path.symlink_to("/tmp/noncanonical"),
+        }
+
+        for name, create_registration in cases.items():
+            with self.subTest(kind=name):
+                self.make_set(self.root, name)
+                registration = registrations / name
+                create_registration(registration)
+                before = self.filesystem_snapshot(self.home)
+
+                for arguments in (
+                    ("rename", name, f"{name}-renamed"),
+                    ("remove", name, "--yes"),
+                ):
+                    result = self.run_cli(*arguments)
+                    self.assert_refused(result)
+                    self.assertIn(
+                        f"cannot be verified at {registration}",
+                        result.stderr,
+                    )
+                    self.assertIn(
+                        "repair the Claude Code registration first",
+                        result.stderr,
+                    )
+                    self.assertNotIn("disable it first", result.stderr)
+                    self.assertEqual(
+                        self.filesystem_snapshot(self.home), before
+                    )
+
+    def test_malformed_claude_registration_reports_codex_blocker(self):
+        self.initialize()
+        self.make_set(self.root, "personal")
+        self.assertEqual(
+            self.run_cli("codex", "enable", "personal").returncode, 0
+        )
+        registration = (
+            self.home / ".claude" / ".skillsets" / "personal"
+        )
+        registration.parent.mkdir(parents=True)
+        registration.write_text("not a link\n")
+        before = self.filesystem_snapshot(self.home)
+
+        for arguments in (
+            ("rename", "personal", "renamed"),
+            ("remove", "personal", "--yes"),
+        ):
+            result = self.run_cli(*arguments)
+            self.assert_refused(result)
+            self.assertIn("Codex is enabled", result.stderr)
+            self.assertIn(
+                "Claude Code registration state cannot be verified",
+                result.stderr,
+            )
+            self.assertIn(
+                "Disable Codex and repair the Claude Code registration first",
+                result.stderr,
+            )
+            self.assertNotIn("if needed", result.stderr)
+            self.assertEqual(self.filesystem_snapshot(self.home), before)
+
+    def test_inaccessible_claude_registration_containers_block_lifecycle(self):
+        self.initialize()
+        self.make_set(self.root, "personal")
+        self.assertEqual(
+            self.run_cli("claude", "enable", "personal").returncode, 0
+        )
+        claude = self.home / ".claude"
+        registrations = claude / ".skillsets"
+        registration = registrations / "personal"
+        before = self.filesystem_snapshot(self.home)
+
+        for inaccessible, blocker in (
+            (registrations, claude),
+            (registration, registrations),
+        ):
+            with self.subTest(inaccessible=inaccessible):
+                fault = self.fault_environment(f"""
+                    import os
+                    original_lstat = os.lstat
+                    def refuse_registration_inspection(path, *args, **kwargs):
+                        if os.fspath(path) == {str(inaccessible)!r}:
+                            raise PermissionError(
+                                13, "Permission denied", os.fspath(path)
+                            )
+                        return original_lstat(path, *args, **kwargs)
+                    os.lstat = refuse_registration_inspection
+                """)
+                for arguments in (
+                    ("rename", "personal", "renamed"),
+                    ("remove", "personal", "--yes"),
+                ):
+                    result = self.run_cli(
+                        *arguments, extra_environment=fault
+                    )
+                    self.assert_refused(result)
+                    self.assertIn(
+                        f"cannot be verified at {blocker}", result.stderr
+                    )
+                    self.assertEqual(
+                        self.filesystem_snapshot(self.home), before
+                    )
+
     def test_verbose_list_prints_aligned_complete_inventory_for_both_flags(self):
         self.initialize()
         empty = self.make_set(self.root, "empty")
@@ -2570,7 +3652,13 @@ _skillset'''
         self.assertEqual(self.filesystem_snapshot(self.home), before)
 
     def test_inspection_commands_reject_uninitialized_and_invalid_layouts_read_only(self):
-        commands = (("list",), ("codex", "list"), ("current",), ("show", "default"))
+        commands = (
+            ("list",),
+            ("codex", "list"),
+            ("claude", "list"),
+            ("current",),
+            ("show", "default"),
+        )
         for index, arguments in enumerate(commands):
             with self.subTest(layout="uninitialized", command=arguments[0]):
                 home = self.new_home(f"inspection-uninitialized-{index}")
@@ -2634,6 +3722,9 @@ _skillset'''
             ("codex", "list"),
             ("codex", "list", "-v"),
             ("codex", "list", "--verbose"),
+            ("claude", "list"),
+            ("claude", "list", "-v"),
+            ("claude", "list", "--verbose"),
             ("current",),
             ("show", "default"),
         ):
@@ -2647,6 +3738,7 @@ _skillset'''
         expected = {
             ("list",): "* default\n",
             ("codex", "list"): "",
+            ("claude", "list"): "",
             ("current",): "default\n",
             ("show", "default"): "No skills installed.\n",
         }
@@ -3012,6 +4104,14 @@ _skillset'''
             ("codex", "list", "--unknown"),
             ("codex", "enable", "default", "--global", "--local"),
             ("codex", "list", "--global", "--local"),
+            ("claude",),
+            ("claude", "unknown"),
+            ("claude", "enable"),
+            ("claude", "disable"),
+            ("claude", "list", "extra"),
+            ("claude", "list", "--unknown"),
+            ("claude", "enable", "default", "--global", "--local"),
+            ("claude", "list", "--global", "--local"),
             ("current", "extra"),
             ("current", "--verbose"),
             ("show", "default", "extra"),

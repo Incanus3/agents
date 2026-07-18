@@ -434,6 +434,92 @@ so the link cannot become stale. Local links are intentionally not tracked
 outside their project directory, so disable them before renaming or removing
 their referenced skillset.
 
+## Use skillsets in Claude Code
+
+Claude Code discovers direct skill directories rather than collection
+directories. `skillset claude` therefore creates one flat link per direct
+skill and records the owning collection separately:
+
+```text
+~/.claude/
+├── .skillsets/
+│   └── personal -> ~/.agents/skillsets/personal/skills
+└── skills/
+    ├── feature-status -> ~/.agents/skillsets/personal/skills/feature-status
+    └── handoff -> ~/.agents/skillsets/personal/skills/handoff
+```
+
+The actual targets are absolute paths. Existing unrelated entries beneath
+`.claude` are preserved.
+
+Enable a collection globally, or beneath the exact current working directory:
+
+```sh
+skillset claude enable personal
+skillset claude enable personal --local
+```
+
+Global scope is the default. `-g`/`--global` and `-l`/`--local` are mutually
+exclusive and work with `enable`, `disable`, and `list`. More than one
+collection can be enabled when their direct skill-directory names do not
+overlap. Enable also checks the effective global and exact-current-directory
+scopes against each other. A different-target name collision is refused
+before registration or projected links are changed; an identical canonical
+target in both scopes is allowed.
+
+Rerun `enable` after adding or removing direct source skills. It adds missing
+links, removes only stale links owned by that registration, and leaves
+unrelated files, directories, and links intact. A partial operation retains
+its registration as recovery intent: rerun the same `enable` to complete the
+current projection, or run `disable` to remove its owned links.
+
+Disable a global or exact-current-directory registration:
+
+```sh
+skillset claude disable personal
+skillset claude disable personal --local
+```
+
+The registration is removed last. The `.claude`, `.claude/skills`, and
+`.claude/.skillsets` containers remain even when empty.
+
+List global and exact-current-directory registrations:
+
+```text
+$ skillset claude list
+[g] always-on
+[g] personal [m]
+[l] obra
+```
+
+Use `--global` or `--local` to omit the redundant scope label, and
+`--verbose` to include the normal skill inventory. This reports synchronized
+registrations, not every skill Claude Code can discover from ancestor,
+descendant, plugin, bundled, or enterprise locations. Claude Code gives a
+personal skill precedence over a project skill with the same name, so listing
+refuses different-target collisions across the effective global and local
+scopes instead of presenting the masked local registration as available.
+
+Global enable can preflight only the exact current project; local
+registrations in other projects are not globally indexed. If a global skill
+is later enabled from elsewhere, running `claude list` or `claude enable`
+inside an affected project reports the collision. Disable one of the
+conflicting registrations before using that local projection.
+
+Local registrations and links contain machine-specific home paths. Keep this
+generated state out of version control without ignoring any hand-authored
+`.claude/skills` content that the project intentionally commits. The command
+does not edit `.gitignore`.
+
+Claude Code may need a session restart when a top-level skills directory is
+created after the session starts. Changes inside an already watched skill
+directory are normally visible through the live link.
+
+Rename and removal refuse globally registered Claude Code skillsets, including
+malformed registration state that cannot safely be classified. Local
+registrations are not indexed globally, so disable every known local
+registration before renaming or removing its source set.
+
 ## Diagnose the managed layout
 
 Run the read-only diagnostic command after initialization, when another command
