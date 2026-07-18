@@ -1132,6 +1132,7 @@ _skillset'''
                     source_prefix = {source_prefix!r}
                     original_lstat = os.lstat
                     original_readlink = os.readlink
+                    original_path_lstat = Path.lstat
                     original_iterdir = Path.iterdir
                     def guarded_lstat(path, *args, **kwargs):
                         candidate = os.fsdecode(os.fspath(path))
@@ -1142,6 +1143,15 @@ _skillset'''
                         if candidate.startswith(source_prefix):
                             marker.write_text(candidate, encoding="utf-8")
                         return original_lstat(path, *args, **kwargs)
+                    def guarded_path_lstat(path, *args, **kwargs):
+                        candidate = os.fsdecode(os.fspath(path))
+                        if candidate == link and failure == "lstat":
+                            raise PermissionError(
+                                errno.EACCES, os.strerror(errno.EACCES), candidate
+                            )
+                        if candidate.startswith(source_prefix):
+                            marker.write_text(candidate, encoding="utf-8")
+                        return original_path_lstat(path, *args, **kwargs)
                     def guarded_readlink(path, *args, **kwargs):
                         candidate = os.fsdecode(os.fspath(path))
                         if candidate == link and failure == "readlink":
@@ -1156,6 +1166,7 @@ _skillset'''
                         return original_iterdir(path, *args, **kwargs)
                     os.lstat = guarded_lstat
                     os.readlink = guarded_readlink
+                    Path.lstat = guarded_path_lstat
                     Path.iterdir = guarded_iterdir
                     """
                 )
