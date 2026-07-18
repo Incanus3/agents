@@ -7,7 +7,7 @@ Linux-only CLI provides lifecycle, inspection, and diagnostic commands plus
 managed delegation to the upstream `skills` CLI.
 
 <p align="center">
-  <img src="agents.png" alt="Agent Smith in front of green code rain" width="320">
+  <img src="agents.png" alt="Pixel-art agent in front of blue terminal code" width="320">
 </p>
 
 ## Requirements and PATH
