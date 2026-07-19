@@ -414,6 +414,34 @@ class SkillsetTests(unittest.TestCase):
             },
         )
 
+    def test_scoped_command_help_describes_each_default(self):
+        for integration, directory in (
+            ("codex", ".codex"),
+            ("claude", ".claude"),
+        ):
+            for command in ("enable", "disable"):
+                with self.subTest(
+                    integration=integration, command=command
+                ):
+                    result = self.run_cli(
+                        integration, command, "--help"
+                    )
+                    self.assertEqual(
+                        result.returncode, 0, result.stderr
+                    )
+                    self.assertIn(
+                        f"~/{directory} directory (default)",
+                        result.stdout,
+                    )
+            with self.subTest(integration=integration, command="list"):
+                result = self.run_cli(integration, "list", "--help")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"~/{directory} directory", result.stdout)
+                self.assertNotIn(
+                    f"~/{directory} directory (default)",
+                    result.stdout,
+                )
+
     def test_completions_emit_deterministic_scripts_without_managed_state(self):
         before = self.filesystem_snapshot(self.home)
         for shell in ("bash", "zsh", "fish"):
@@ -528,12 +556,20 @@ COMP_WORDS=(skillset codex enable d); COMP_CWORD=3; _skillset_completion
 printf 'codex-enable:%s\n' "${COMPREPLY[*]}"
 COMP_WORDS=(skillset codex enable --local d); COMP_CWORD=4; _skillset_completion
 printf 'codex-local-enable:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(skillset codex enable --l); COMP_CWORD=3; _skillset_completion
+printf 'codex-flag-before:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(skillset codex enable default --l); COMP_CWORD=4; _skillset_completion
+printf 'codex-flag-after:%s\n' "${COMPREPLY[*]}"
 COMP_WORDS=(skillset codex list --v); COMP_CWORD=3; _skillset_completion
 printf 'codex-list:%s\n' "${COMPREPLY[*]}"
 COMP_WORDS=(skillset claude e); COMP_CWORD=2; _skillset_completion
 printf 'claude-command:%s\n' "${COMPREPLY[*]}"
 COMP_WORDS=(skillset claude enable --local d); COMP_CWORD=4; _skillset_completion
 printf 'claude-local-enable:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(skillset claude enable --l); COMP_CWORD=3; _skillset_completion
+printf 'claude-flag-before:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(skillset claude enable default --l); COMP_CWORD=4; _skillset_completion
+printf 'claude-flag-after:%s\n' "${COMPREPLY[*]}"
 COMP_WORDS=(skillset claude enable -- ""); COMP_CWORD=4; _skillset_completion
 printf 'claude-terminator:%s\n' "${COMPREPLY[*]}"
 COMP_WORDS=(skillset claude list --v); COMP_CWORD=3; _skillset_completion
@@ -555,8 +591,11 @@ printf 'claude-list:%s\n' "${COMPREPLY[*]}"'''
                 "from-separated:default demo", "new:0",
                 "terminator:0", "skills:0", "codex-command:enable",
                 "codex-enable:default demo", "codex-local-enable:default demo",
+                "codex-flag-before:--local", "codex-flag-after:--local",
                 "codex-list:--verbose", "claude-command:enable",
                 "claude-local-enable:default demo",
+                "claude-flag-before:--local",
+                "claude-flag-after:--local",
                 "claude-terminator:default demo", "claude-list:--verbose",
             ],
         )
@@ -2025,6 +2064,35 @@ _skillset'''
         self.assertEqual(listed.returncode, 0, listed.stderr)
         self.assertEqual(listed.stdout, "[g] default\n")
 
+    def test_claude_enable_validates_scope_roots_before_deduplication(self):
+        self.initialize()
+        source = self.root / "skillsets" / "default" / "skills"
+        self.write_skill(
+            source, "alpha", "name: alpha\ndescription: Alpha"
+        )
+        project = self.sandbox / "claude-dangling-scope"
+        project.mkdir()
+        global_root = self.home / ".claude"
+        local_root = project / ".claude"
+        global_root.symlink_to(local_root, target_is_directory=True)
+        before = self.filesystem_snapshot(self.sandbox)
+
+        result = self.run_cli(
+            "claude",
+            "enable",
+            "default",
+            "--local",
+            cwd=project,
+        )
+
+        self.assert_refused(result)
+        self.assertIn(
+            f"container must be a real directory: {global_root}",
+            result.stderr,
+        )
+        self.assertEqual(self.filesystem_snapshot(self.sandbox), before)
+        self.assertFalse(local_root.exists())
+
     def test_claude_enable_refuses_cross_scope_skill_name_collisions(self):
         for index, first_scope in enumerate(("global", "local")):
             with self.subTest(first_scope=first_scope):
@@ -2386,6 +2454,144 @@ _skillset'''
                     recovered.returncode, 0, recovered.stderr
                 )
 
+    def test_claude_disable_revalidates_public_directory_bindings(self):
+        for index, container_name in enumerate(("skills", ".skillsets")):
+            with self.subTest(container=container_name):
+                home = self.new_home(f"claude-disable-binding-{index}")
+                root = self.initialize(home=home)
+                source = root / "skillsets" / "default" / "skills"
+                self.write_skill(
+                    source,
+                    "alpha",
+                    "name: alpha\ndescription: Alpha",
+                )
+                self.assertEqual(
+                    self.run_cli(
+                        "claude", "enable", "default", home=home
+                    ).returncode,
+                    0,
+                )
+                claude = home / ".claude"
+                public = claude / container_name
+                detached = claude / f"{container_name}.detached"
+                trigger = (
+                    "alpha"
+                    if container_name == "skills"
+                    else "default"
+                )
+                recreated_name = trigger
+                recreated_target = (
+                    str(source / "alpha")
+                    if container_name == "skills"
+                    else str(source)
+                )
+                fault = self.fault_environment(f"""
+                    import os
+                    original_unlink = os.unlink
+                    replaced = False
+                    def replace_directory_after_unlink(name, *args, **kwargs):
+                        global replaced
+                        result = original_unlink(name, *args, **kwargs)
+                        if (
+                            not replaced
+                            and name == {trigger!r}
+                            and kwargs.get("dir_fd") is not None
+                        ):
+                            os.rename({str(public)!r}, {str(detached)!r})
+                            os.mkdir({str(public)!r})
+                            os.symlink(
+                                {recreated_target!r},
+                                os.path.join(
+                                    {str(public)!r}, {recreated_name!r}
+                                ),
+                            )
+                            replaced = True
+                        return result
+                    os.unlink = replace_directory_after_unlink
+                """)
+
+                result = self.run_cli(
+                    "claude",
+                    "disable",
+                    "default",
+                    home=home,
+                    extra_environment=fault,
+                )
+
+                self.assert_refused(result)
+                self.assertIn(
+                    f"directory changed during synchronization: {public}",
+                    result.stderr,
+                )
+                self.assertIn(
+                    "skillset claude disable default", result.stderr
+                )
+                self.assertTrue(detached.is_dir())
+                self.assertTrue(
+                    os.path.lexists(public / recreated_name)
+                )
+
+                recovered = self.run_cli(
+                    "claude", "disable", "default", home=home
+                )
+                self.assertEqual(
+                    recovered.returncode, 0, recovered.stderr
+                )
+                self.assertFalse(
+                    os.path.lexists(public / recreated_name)
+                )
+
+    def test_claude_disable_detects_initially_absent_containers_appearing(self):
+        for index, container_name in enumerate(("skills", ".skillsets")):
+            with self.subTest(container=container_name):
+                home = self.new_home(
+                    f"claude-disable-appeared-{index}"
+                )
+                self.initialize(home=home)
+                claude = home / ".claude"
+                claude.mkdir()
+                appeared = claude / container_name
+                fault = self.fault_environment(f"""
+                    import os
+                    original_stat = os.stat
+                    appeared = False
+                    def create_during_final_verification(path, *args, **kwargs):
+                        global appeared
+                        if (
+                            not appeared
+                            and os.fspath(path) == {str(appeared)!r}
+                            and kwargs.get("follow_symlinks") is False
+                        ):
+                            os.mkdir({str(appeared)!r})
+                            appeared = True
+                        return original_stat(path, *args, **kwargs)
+                    os.stat = create_during_final_verification
+                """)
+
+                result = self.run_cli(
+                    "claude",
+                    "disable",
+                    "default",
+                    home=home,
+                    extra_environment=fault,
+                )
+
+                self.assert_refused(result)
+                self.assertIn(
+                    f"directory changed during synchronization: {appeared}",
+                    result.stderr,
+                )
+                self.assertIn(
+                    "skillset claude disable default", result.stderr
+                )
+                self.assertTrue(appeared.is_dir())
+                recovered = self.run_cli(
+                    "claude", "disable", "default", home=home
+                )
+                self.assertEqual(
+                    recovered.returncode, 0, recovered.stderr
+                )
+
     def test_claude_ownership_requires_matching_basename_and_preserves_aliases(self):
         self.initialize()
         source = self.root / "skillsets" / "default" / "skills"
@@ -2493,6 +2699,96 @@ _skillset'''
                 self.home / ".claude" / ".skillsets" / "personal"
             )
         )
+
+    def test_claude_first_enable_classifies_directory_creation_interrupts(self):
+        for directory_name in (".claude", "skills", ".skillsets"):
+            for phase in ("before", "after"):
+                with self.subTest(
+                    directory=directory_name, phase=phase
+                ):
+                    suffix = directory_name.replace(".", "dot")
+                    home = self.new_home(
+                        f"claude-mkdir-{suffix}-{phase}"
+                    )
+                    root = self.initialize(home=home)
+                    source = root / "skillsets" / "default" / "skills"
+                    self.write_skill(
+                        source,
+                        "alpha",
+                        "name: alpha\ndescription: Alpha",
+                    )
+                    claude = home / ".claude"
+                    target = (
+                        claude
+                        if directory_name == ".claude"
+                        else claude / directory_name
+                    )
+                    fault = self.fault_environment(f"""
+                        import os
+                        original_mkdir = os.mkdir
+                        interrupted = False
+                        def interrupt_directory_creation(path, *args, **kwargs):
+                            global interrupted
+                            matches = (
+                                os.fspath(path) == {str(claude)!r}
+                                if {directory_name == ".claude"!r}
+                                else (
+                                    os.fspath(path) == {directory_name!r}
+                                    and kwargs.get("dir_fd") is not None
+                                )
+                            )
+                            if matches and not interrupted:
+                                interrupted = True
+                                if {phase == "before"!r}:
+                                    raise KeyboardInterrupt()
+                                original_mkdir(path, *args, **kwargs)
+                                raise KeyboardInterrupt()
+                            return original_mkdir(path, *args, **kwargs)
+                        os.mkdir = interrupt_directory_creation
+                    """)
+
+                    interrupted = self.run_cli(
+                        "claude",
+                        "enable",
+                        "default",
+                        home=home,
+                        extra_environment=fault,
+                    )
+
+                    self.assertEqual(
+                        interrupted.returncode, 130, interrupted.stderr
+                    )
+                    if directory_name == ".claude" and phase == "before":
+                        self.assertEqual(
+                            interrupted.stderr, "skillset: interrupted\n"
+                        )
+                        self.assertFalse(os.path.lexists(claude))
+                    else:
+                        self.assertIn(
+                            str(claude / ".skillsets" / "default"),
+                            interrupted.stderr,
+                        )
+                        self.assertIn(str(source), interrupted.stderr)
+                        self.assertIn(
+                            str(claude / "skills"), interrupted.stderr
+                        )
+                        self.assertIn(
+                            "skillset claude enable default",
+                            interrupted.stderr,
+                        )
+                        self.assertTrue(claude.is_dir())
+                    if phase == "after":
+                        self.assertTrue(target.is_dir())
+
+                    recovered = self.run_cli(
+                        "claude", "enable", "default", home=home
+                    )
+                    self.assertEqual(
+                        recovered.returncode, 0, recovered.stderr
+                    )
+                    self.assertTrue(
+                        (claude / "skills" / "alpha").is_symlink()
+                    )
 
     def test_claude_interrupted_registration_creation_reports_and_recovers(self):
         self.initialize()

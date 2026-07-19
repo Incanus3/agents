@@ -97,11 +97,11 @@ _skillset_completion() {{
             else
                 case "${{COMP_WORDS[2]}}" in
                     enable|disable)
+                        if (( ! after_terminator )); then
+                            candidates='-h --help -g --global -l --local'
+                        fi
                         if (( position == 1 )); then
-                            candidates="$(_skillset_names)"
-                            if (( ! after_terminator )); then
-                                candidates="-h --help -g --global -l --local $candidates"
-                            fi
+                            candidates+=" $(_skillset_names)"
                         fi
                         ;;
                     list)

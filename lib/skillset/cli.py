@@ -77,17 +77,33 @@ def parser():
         "enable", help="enable a skillset for Codex"
     )
     codex_enable_parser.add_argument("name")
-    add_codex_scope_options(codex_enable_parser)
+    add_scope_options(
+        codex_enable_parser,
+        dest="codex_scope",
+        product="Codex",
+        directory=".codex",
+    )
     codex_disable_parser = codex_commands.add_parser(
         "disable", help="disable a skillset for Codex"
     )
     codex_disable_parser.add_argument("name")
-    add_codex_scope_options(codex_disable_parser)
+    add_scope_options(
+        codex_disable_parser,
+        dest="codex_scope",
+        product="Codex",
+        directory=".codex",
+    )
     codex_list_parser = codex_commands.add_parser(
         "list", help="list Codex-enabled skillsets"
     )
     codex_list_parser.add_argument("-v", "--verbose", action="store_true")
-    add_codex_scope_options(codex_list_parser, default="all")
+    add_scope_options(
+        codex_list_parser,
+        dest="codex_scope",
+        product="Codex",
+        directory=".codex",
+        default="all",
+    )
     claude_parser = commands.add_parser(
         "claude", help="manage Claude Code-enabled skillsets"
     )
@@ -98,17 +114,33 @@ def parser():
         "enable", help="enable a skillset for Claude Code"
     )
     claude_enable_parser.add_argument("name")
-    add_claude_scope_options(claude_enable_parser)
+    add_scope_options(
+        claude_enable_parser,
+        dest="claude_scope",
+        product="Claude Code",
+        directory=".claude",
+    )
     claude_disable_parser = claude_commands.add_parser(
         "disable", help="disable a skillset for Claude Code"
     )
     claude_disable_parser.add_argument("name")
-    add_claude_scope_options(claude_disable_parser)
+    add_scope_options(
+        claude_disable_parser,
+        dest="claude_scope",
+        product="Claude Code",
+        directory=".claude",
+    )
     claude_list_parser = claude_commands.add_parser(
         "list", help="list Claude Code-enabled skillsets"
     )
     claude_list_parser.add_argument("-v", "--verbose", action="store_true")
-    add_claude_scope_options(claude_list_parser, default="all")
+    add_scope_options(
+        claude_list_parser,
+        dest="claude_scope",
+        product="Claude Code",
+        directory=".claude",
+        default="all",
+    )
     commands.add_parser("current", help="print the active skillset name")
     show_parser = commands.add_parser("show", help="show skills in a skillset")
     show_parser.add_argument("name", nargs="?")
@@ -129,46 +161,38 @@ def parser():
     return command_parser
 
 
-def add_codex_scope_options(command_parser, default="global"):
+def add_scope_options(
+    command_parser,
+    *,
+    dest,
+    product,
+    directory,
+    default="global",
+):
     scope = command_parser.add_mutually_exclusive_group()
+    global_help = f"manage the global ~/{directory} directory"
+    if default == "global":
+        global_help += " (default)"
     scope.add_argument(
         "-g",
         "--global",
-        dest="codex_scope",
+        dest=dest,
         action="store_const",
         const="global",
-        help="manage the global ~/.codex directory (default)",
+        help=global_help,
     )
     scope.add_argument(
         "-l",
         "--local",
-        dest="codex_scope",
+        dest=dest,
         action="store_const",
         const="local",
-        help="manage the current directory's .codex directory",
+        help=(
+            f"manage the current directory's {directory} directory for "
+            f"{product}"
+        ),
     )
-    command_parser.set_defaults(codex_scope=default)
-
-
-def add_claude_scope_options(command_parser, default="global"):
-    scope = command_parser.add_mutually_exclusive_group()
-    scope.add_argument(
-        "-g",
-        "--global",
-        dest="claude_scope",
-        action="store_const",
-        const="global",
-        help="manage the global ~/.claude directory (default)",
-    )
-    scope.add_argument(
-        "-l",
-        "--local",
-        dest="claude_scope",
-        action="store_const",
-        const="local",
-        help="manage the current directory's .claude directory",
-    )
-    command_parser.set_defaults(claude_scope=default)
+    command_parser.set_defaults(**{dest: default})
 
 
 def dispatch_locked_command(root, arguments, home_lock, lock_file, command_parser):

@@ -459,13 +459,14 @@ skillset claude enable personal
 skillset claude enable personal --local
 ```
 
-Global scope is the default. `-g`/`--global` and `-l`/`--local` are mutually
-exclusive and work with `enable`, `disable`, and `list`. More than one
-collection can be enabled when their direct skill-directory names do not
-overlap. Enable also checks the effective global and exact-current-directory
-scopes against each other. A different-target name collision is refused
-before registration or projected links are changed; an identical canonical
-target in both scopes is allowed.
+Global scope is the default for `enable` and `disable`; an unscoped `list`
+combines global and exact-current-directory registrations. `-g`/`--global` and
+`-l`/`--local` are mutually exclusive and work with all three commands. More
+than one collection can be enabled when their direct skill-directory names do
+not overlap. Enable also checks the effective global and
+exact-current-directory scopes against each other. A different-target name
+collision is refused before registration or projected links are changed; an
+identical canonical target in both scopes is allowed.
 
 Rerun `enable` after adding or removing direct source skills. It adds missing
 links, removes only stale links owned by that registration, and leaves

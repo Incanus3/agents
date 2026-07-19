@@ -582,7 +582,9 @@ network access in the automated suite.
 
 - Disable removes all owned links and its registration but preserves every
   unrelated `.claude` entry and all containers.
-- Missing and noncanonical registrations are refused.
+- Missing registrations are accepted as an idempotent recovery state: any
+  remaining canonical projection is cleaned and the result is verified.
+  Noncanonical registrations are refused.
 - A canonical registration with a partial projection can be completed by
   enable or cleaned by disable.
 - Dangling owned links for removed source children are cleaned by disable.
