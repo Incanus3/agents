@@ -299,6 +299,11 @@ function __skillset_using_command
     test (count $tokens) -ge 2; and test $tokens[2] = $argv[1]
 end
 
+function __skillset_using_codex_command
+    set -l tokens (commandline -xpc)
+    test (count $tokens) -ge 3; and test $tokens[3] = $argv[1]
+end
+
 function __skillset_positional_count
     set -l tokens (commandline -xpc)
     set -e tokens[1..2]
@@ -359,15 +364,15 @@ complete -c skillset -n '__skillset_using_command remove; and __skillset_at_posi
 complete -c skillset -n '__skillset_using_command remove' -l yes -d 'Skip confirmation'
 complete -c skillset -n '__skillset_using_command list' -s v -l verbose -d 'Show skill inventory'
 complete -c skillset -n '__skillset_using_command codex; and __skillset_at_position 0' -a 'enable disable list'
-complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = enable; and __skillset_at_position 1' -a '(__skillset_names)'
-complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = disable; and __skillset_at_position 1' -a '(__skillset_names)'
-complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = enable' -s g -l global -d 'Manage global Codex skills'
-complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = enable' -s l -l local -d 'Manage local Codex skills'
-complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = disable' -s g -l global -d 'Manage global Codex skills'
-complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = disable' -s l -l local -d 'Manage local Codex skills'
-complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = list' -s v -l verbose -d 'Show skill inventory'
-complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = list' -s g -l global -d 'List global Codex skills'
-complete -c skillset -n '__skillset_using_command codex; and test (commandline -xpc)[3] = list' -s l -l local -d 'List local Codex skills'
+complete -c skillset -n '__skillset_using_command codex; and __skillset_using_codex_command enable; and __skillset_at_position 1' -a '(__skillset_names)'
+complete -c skillset -n '__skillset_using_command codex; and __skillset_using_codex_command disable; and __skillset_at_position 1' -a '(__skillset_names)'
+complete -c skillset -n '__skillset_using_command codex; and __skillset_using_codex_command enable' -s g -l global -d 'Manage global Codex skills'
+complete -c skillset -n '__skillset_using_command codex; and __skillset_using_codex_command enable' -s l -l local -d 'Manage local Codex skills'
+complete -c skillset -n '__skillset_using_command codex; and __skillset_using_codex_command disable' -s g -l global -d 'Manage global Codex skills'
+complete -c skillset -n '__skillset_using_command codex; and __skillset_using_codex_command disable' -s l -l local -d 'Manage local Codex skills'
+complete -c skillset -n '__skillset_using_command codex; and __skillset_using_codex_command list' -s v -l verbose -d 'Show skill inventory'
+complete -c skillset -n '__skillset_using_command codex; and __skillset_using_codex_command list' -s g -l global -d 'List global Codex skills'
+complete -c skillset -n '__skillset_using_command codex; and __skillset_using_codex_command list' -s l -l local -d 'List local Codex skills'
 complete -c skillset -n '__skillset_using_command claude; and __skillset_at_position 0' -a 'enable disable list'
 complete -c skillset -n '__skillset_using_command claude; and test (commandline -xpc)[3] = enable; and __skillset_at_position 1' -a '(__skillset_names)'
 complete -c skillset -n '__skillset_using_command claude; and test (commandline -xpc)[3] = disable; and __skillset_at_position 1' -a '(__skillset_names)'

@@ -622,6 +622,7 @@ printf 'claude-list:%s\n' "${COMPREPLY[*]}"'''
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, "")
             return [line.split("\t", 1)[0] for line in result.stdout.splitlines()]
 
         self.assertIn("show", candidates("skillset sh"))
@@ -631,6 +632,9 @@ printf 'claude-list:%s\n' "${COMPREPLY[*]}"'''
         self.assertNotIn("commandline -opc", generated.stdout)
         self.assertEqual(candidates("skillset rename default n"), [])
         self.assertEqual(candidates("skillset skills l"), [])
+        self.assertEqual(
+            candidates("skillset codex "), ["disable", "enable", "list"]
+        )
         self.assertEqual(candidates("skillset codex e"), ["enable"])
         self.assertEqual(candidates("skillset codex enable d"), ["default", "demo"])
         self.assertEqual(candidates("skillset codex list --v"), ["--verbose"])
