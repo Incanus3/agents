@@ -28,6 +28,12 @@ Distinguish three independent concepts:
   upstream maintenance; manual sets have `.skillset-manual` and are edited
   directly.
 
+Treat mode markers as mutually exclusive: a lockfile without a manual marker is
+managed, and a manual marker without a lockfile is manual. Both entries or
+neither entry make the set invalid. Do not add or remove either entry to guess
+the intended mode; `doctor --fix` can create a managed empty lockfile only when
+the real `skills/` directory is empty.
+
 Do not infer Codex enablement from the active marker or activation from a Codex
 listing.
 
