@@ -4,6 +4,7 @@ import stat
 import sys
 import json
 
+from .claude import global_registration_blocker
 from .codex import canonical_link
 from .errors import OperationalError
 from .layout import (
@@ -445,6 +446,41 @@ def rename_active_set(root, old, new, old_name, new_name):
         recover_active_rename(root, old_name, new_name, error)
 
 
+def refuse_enabled_lifecycle(root, name, action):
+    codex_enabled = canonical_link(root, name)
+    claude_blocker = global_registration_blocker(root, name)
+    if not codex_enabled and claude_blocker is None:
+        return
+    if claude_blocker is not None and not claude_blocker.enabled:
+        blocker_kind = (
+            "registration"
+            if claude_blocker.path
+            == root.parent / ".claude" / ".skillsets" / name
+            else "container"
+        )
+        codex_blocker = "Codex is enabled, and " if codex_enabled else ""
+        remediation = (
+            "Disable Codex and repair"
+            if codex_enabled
+            else "You must repair"
+        )
+        raise OperationalError(
+            f"cannot {action} skillset {name!r}; {codex_blocker}Claude Code "
+            f"registration state cannot be verified at {claude_blocker.path}. "
+            f"{remediation} the Claude Code {blocker_kind} first"
+        )
+    integrations = []
+    if codex_enabled:
+        integrations.append("Codex")
+    if claude_blocker is not None and claude_blocker.enabled:
+        integrations.append("Claude Code")
+    joined = " and ".join(integrations)
+    raise OperationalError(
+        f"cannot {action} {joined}-enabled skillset {name!r}; "
+        "disable it first"
+    )
+
+
 def rename(root, old_name, new_name):
     validate_name(old_name)
     validate_name(new_name)
@@ -453,10 +489,7 @@ def rename(root, old_name, new_name):
     new = set_path(root, new_name)
     if lexists(new):
         raise OperationalError(f"skillset already exists: {new}")
-    if canonical_link(root, old_name):
-        raise OperationalError(
-            f"cannot rename Codex-enabled skillset {old_name!r}; disable it first"
-        )
+    refuse_enabled_lifecycle(root, old_name, "rename")
 
     if old_name != active_name:
         rename_inactive_set(old, new, old_name, new_name)
@@ -484,10 +517,7 @@ def remove(root, name, confirmed):
         raise OperationalError(
             f"cannot remove active skillset {name!r}; activate another set first"
         )
-    if canonical_link(root, name):
-        raise OperationalError(
-            f"cannot remove Codex-enabled skillset {name!r}; disable it first"
-        )
+    refuse_enabled_lifecycle(root, name, "remove")
     if not confirmed:
         confirm_removal(name)
         validate_skillsets_directory(root)

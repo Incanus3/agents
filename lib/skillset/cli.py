@@ -4,13 +4,16 @@ import argparse
 import sys
 from pathlib import Path
 
+from .claude import disable as claude_disable
+from .claude import enable as claude_enable
+from .claude import list_enabled as list_claude_enabled
 from .completions import emit_completions
 from .codex import disable as codex_disable
 from .codex import enable as codex_enable
 from .codex import list_enabled as list_codex_enabled
 from .delegate import delegate_skills
 from .doctor import doctor
-from .errors import OperationalError
+from .errors import ClaudeInterrupted, OperationalError
 from .layout import operation_lock, stable_home_lock
 from .metadata import current, list_sets, printable_text, show
 from .operations import create, init, remove, rename, use
@@ -74,17 +77,70 @@ def parser():
         "enable", help="enable a skillset for Codex"
     )
     codex_enable_parser.add_argument("name")
-    add_codex_scope_options(codex_enable_parser)
+    add_scope_options(
+        codex_enable_parser,
+        dest="codex_scope",
+        product="Codex",
+        directory=".codex",
+    )
     codex_disable_parser = codex_commands.add_parser(
         "disable", help="disable a skillset for Codex"
     )
     codex_disable_parser.add_argument("name")
-    add_codex_scope_options(codex_disable_parser)
+    add_scope_options(
+        codex_disable_parser,
+        dest="codex_scope",
+        product="Codex",
+        directory=".codex",
+    )
     codex_list_parser = codex_commands.add_parser(
         "list", help="list Codex-enabled skillsets"
     )
     codex_list_parser.add_argument("-v", "--verbose", action="store_true")
-    add_codex_scope_options(codex_list_parser, default="all")
+    add_scope_options(
+        codex_list_parser,
+        dest="codex_scope",
+        product="Codex",
+        directory=".codex",
+        default="all",
+    )
+    claude_parser = commands.add_parser(
+        "claude", help="manage Claude Code-enabled skillsets"
+    )
+    claude_commands = claude_parser.add_subparsers(
+        dest="claude_command", required=True
+    )
+    claude_enable_parser = claude_commands.add_parser(
+        "enable", help="enable a skillset for Claude Code"
+    )
+    claude_enable_parser.add_argument("name")
+    add_scope_options(
+        claude_enable_parser,
+        dest="claude_scope",
+        product="Claude Code",
+        directory=".claude",
+    )
+    claude_disable_parser = claude_commands.add_parser(
+        "disable", help="disable a skillset for Claude Code"
+    )
+    claude_disable_parser.add_argument("name")
+    add_scope_options(
+        claude_disable_parser,
+        dest="claude_scope",
+        product="Claude Code",
+        directory=".claude",
+    )
+    claude_list_parser = claude_commands.add_parser(
+        "list", help="list Claude Code-enabled skillsets"
+    )
+    claude_list_parser.add_argument("-v", "--verbose", action="store_true")
+    add_scope_options(
+        claude_list_parser,
+        dest="claude_scope",
+        product="Claude Code",
+        directory=".claude",
+        default="all",
+    )
     commands.add_parser("current", help="print the active skillset name")
     show_parser = commands.add_parser("show", help="show skills in a skillset")
     show_parser.add_argument("name", nargs="?")
@@ -105,25 +161,38 @@ def parser():
     return command_parser
 
 
-def add_codex_scope_options(command_parser, default="global"):
+def add_scope_options(
+    command_parser,
+    *,
+    dest,
+    product,
+    directory,
+    default="global",
+):
     scope = command_parser.add_mutually_exclusive_group()
+    global_help = f"manage the global ~/{directory} directory"
+    if default == "global":
+        global_help += " (default)"
     scope.add_argument(
         "-g",
         "--global",
-        dest="codex_scope",
+        dest=dest,
         action="store_const",
         const="global",
-        help="manage the global ~/.codex directory (default)",
+        help=global_help,
     )
     scope.add_argument(
         "-l",
         "--local",
-        dest="codex_scope",
+        dest=dest,
         action="store_const",
         const="local",
-        help="manage the current directory's .codex directory",
+        help=(
+            f"manage the current directory's {directory} directory for "
+            f"{product}"
+        ),
     )
-    command_parser.set_defaults(codex_scope=default)
+    command_parser.set_defaults(**{dest: default})
 
 
 def dispatch_locked_command(root, arguments, home_lock, lock_file, command_parser):
@@ -152,6 +221,19 @@ def dispatch_locked_command(root, arguments, home_lock, lock_file, command_parse
             raise OperationalError(
                 f"unsupported Codex command: {arguments.codex_command}"
             )
+    elif arguments.command == "claude":
+        if arguments.claude_command == "enable":
+            claude_enable(root, arguments.name, arguments.claude_scope)
+        elif arguments.claude_command == "disable":
+            claude_disable(root, arguments.name, arguments.claude_scope)
+        elif arguments.claude_command == "list":
+            list_claude_enabled(
+                root, arguments.verbose, arguments.claude_scope
+            )
+        else:
+            raise OperationalError(
+                f"unsupported Claude Code command: {arguments.claude_command}"
+            )
     elif arguments.command == "current":
         current(root)
     elif arguments.command == "show":
@@ -171,6 +253,8 @@ def dispatch_locked_command(root, arguments, home_lock, lock_file, command_parse
 def run_managed_command(root, arguments, command_parser):
     inspection = arguments.command in {"list", "current", "show"} or (
         arguments.command == "codex" and arguments.codex_command == "list"
+    ) or (
+        arguments.command == "claude" and arguments.claude_command == "list"
     )
     with stable_home_lock(root) as home_lock:
         if arguments.command == "doctor":
@@ -199,6 +283,12 @@ def main():
     root = Path.home() / ".agents"
     try:
         return run_managed_command(root, arguments, command_parser)
+    except ClaudeInterrupted as error:
+        print(
+            f"skillset: interrupted: {printable_text(error.message)}",
+            file=sys.stderr,
+        )
+        return 130
     except OperationalError as error:
         print(format_command_error(arguments.command, error), file=sys.stderr)
         return 1
