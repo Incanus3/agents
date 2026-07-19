@@ -1,0 +1,4 @@
+interface:
+  display_name: "Skillset CLI"
+  short_description: "Manage named global agent skill collections"
+  default_prompt: "Use $skillset-cli to inspect and safely manage my agent skillsets."
