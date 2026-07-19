@@ -633,7 +633,8 @@ printf 'claude-list:%s\n' "${COMPREPLY[*]}"'''
         self.assertEqual(candidates("skillset rename default n"), [])
         self.assertEqual(candidates("skillset skills l"), [])
         self.assertEqual(
-            candidates("skillset codex "), ["disable", "enable", "list"]
+            candidates("skillset codex "),
+            ["disable", "enable", "list", "-h", "--help"],
         )
         self.assertEqual(candidates("skillset codex e"), ["enable"])
         self.assertEqual(candidates("skillset codex enable d"), ["default", "demo"])
@@ -641,6 +642,30 @@ printf 'claude-list:%s\n' "${COMPREPLY[*]}"'''
         self.assertEqual(candidates("skillset claude e"), ["enable"])
         self.assertEqual(candidates("skillset claude enable d"), ["default", "demo"])
         self.assertEqual(candidates("skillset claude list --v"), ["--verbose"])
+
+        for commandline, options in {
+            "skillset ": ("-h", "--help"),
+            "skillset init ": ("-h", "--help"),
+            "skillset create ": ("-h", "--help", "-f", "--from", "--manual", "--use"),
+            "skillset use ": ("-h", "--help"),
+            "skillset rename ": ("-h", "--help"),
+            "skillset remove ": ("-h", "--help", "--yes"),
+            "skillset list ": ("-h", "--help", "-v", "--verbose"),
+            "skillset codex ": ("-h", "--help"),
+            "skillset codex enable ": ("-h", "--help", "-g", "--global", "-l", "--local"),
+            "skillset codex disable ": ("-h", "--help", "-g", "--global", "-l", "--local"),
+            "skillset codex list ": ("-h", "--help", "-v", "--verbose", "-g", "--global", "-l", "--local"),
+            "skillset claude ": ("-h", "--help"),
+            "skillset claude enable ": ("-h", "--help", "-g", "--global", "-l", "--local"),
+            "skillset claude disable ": ("-h", "--help", "-g", "--global", "-l", "--local"),
+            "skillset claude list ": ("-h", "--help", "-v", "--verbose", "-g", "--global", "-l", "--local"),
+            "skillset current ": ("-h", "--help"),
+            "skillset show ": ("-h", "--help"),
+            "skillset doctor ": ("-h", "--help", "--fix"),
+            "skillset completions ": ("-h", "--help"),
+        }.items():
+            with self.subTest(commandline=commandline):
+                self.assertTrue(set(options).issubset(candidates(commandline)))
 
     def test_completion_name_lookup_discards_stdout_on_failure(self):
         stub_directory = self.sandbox / "failed-list-bin"
