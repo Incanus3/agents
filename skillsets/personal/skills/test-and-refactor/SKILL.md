@@ -1,6 +1,6 @@
 ---
 name: test-and-refactor
-description: Add characterization-style tests before refactoring to reduce complexity and method length. Use when asked to test then refactor code.
+description: Add characterization-style tests before refactoring to reduce complexity and method length. Manual invocation only: apply only if the user explicitly invokes `$test-and-refactor`; never select automatically from a natural-language request.
 ---
 
 Cover this code with behavior-locking tests, then refactor it to reduce complexity and method length.

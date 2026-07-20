@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Thoroughly review current branch changes for defects, omissions, security issues, tests, and maintainability. Use when asked to review code changes.
+description: Thoroughly review current branch changes for defects, omissions, security issues, tests, and maintainability. Manual invocation only: apply only if the user explicitly invokes `$code-review`; never select automatically from a natural-language request.
 ---
 
 Go through the changes in this branch and review them thoroughly. Use the relevant skills for this.

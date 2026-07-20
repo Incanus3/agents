@@ -1,6 +1,6 @@
 ---
 name: find-extraction-candidate
-description: Identify the best cohesive responsibility to extract during a refactor. Use when asked for a safe, well-scoped extraction recommendation.
+description: Identify the best cohesive responsibility to extract during a refactor. Manual invocation only: apply only if the user explicitly invokes `$find-extraction-candidate`; never select automatically from a natural-language request.
 ---
 
 I want to refactor this code by extracting one cohesive responsibility into a smaller collaborator.

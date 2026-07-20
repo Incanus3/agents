@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: Create or update a detailed handoff document for the current work and produce a concise continuation prompt. Use when handing work between sessions.
+description: Create or update a detailed handoff document for the current work and produce a concise continuation prompt. Manual invocation only: apply only if the user explicitly invokes `$handoff`; never select automatically from a natural-language request.
 ---
 
 If work is already based on a handoff file, update that handoff. Otherwise, or when explicitly

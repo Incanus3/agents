@@ -1,6 +1,6 @@
 ---
 name: jj-commit-and-push
-description: Commit current Jujutsu changes and advance and push the active bookmark. Use when asked to commit and push with jj.
+description: Commit current Jujutsu changes and advance and push the active bookmark. Manual invocation only: apply only if the user explicitly invokes `$jj-commit-and-push`; never select automatically from a natural-language request.
 ---
 
 Given the current changes from `jj diff` and the session context, commit them with `jj commit` using

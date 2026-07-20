@@ -1,6 +1,6 @@
 ---
 name: characterization-test
-description: Add durable characterization-style test coverage before a refactor. Use when asked to lock down existing behavior with tests.
+description: Add durable characterization-style test coverage before a refactor. Manual invocation only: apply only if the user explicitly invokes `$characterization-test`; never select automatically from a natural-language request.
 ---
 
 Make sure this code has very good test coverage, so that I can confidently refactor it.
