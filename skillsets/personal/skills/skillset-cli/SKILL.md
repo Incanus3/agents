@@ -127,7 +127,8 @@ as `find` and `use` remain available through the wrapper.
 
 ## Control Codex Discovery
 
-Use global scope by default or select the current project explicitly:
+`enable` and `disable` default to global scope. An unscoped `list` combines
+global and current-project entries; use `--global` or `--local` to filter it:
 
 ```text
 skillset codex enable <name>
@@ -144,7 +145,9 @@ removes only the expected canonical link.
 
 ## Control Claude Code Discovery
 
-Use global scope by default or project it beneath the exact current directory:
+`enable` and `disable` default to global scope. An unscoped `list` combines
+global and exact-current-directory registrations; use `--global` or `--local`
+to filter it:
 
 ```text
 skillset claude enable <name>
