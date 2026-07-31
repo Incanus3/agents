@@ -229,7 +229,7 @@ and summarize the outcome rather than the conversation.
 
 ## Prefer repository-aware version-control tooling
 
-Before the first version-control operation, run `but status --format json` when `but` is available. If `but` is
+Before the first version-control operation, run `but status --json` when `but` is available. If `but` is
 initialized in the workspace, use `but` for version-control operations; use raw Git only when `but` cannot perform the
 required action. Never run `jj` in a `but` workspace.
 
