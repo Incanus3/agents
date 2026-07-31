@@ -1,0 +1,35 @@
+personality = "pragmatic"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "medium"
+approvals_reviewer = "auto_review"
+service_tier = "default"
+suppress_unstable_features_warning = true
+# Temporary workaround for https://github.com/openai/codex/issues/34024.
+# The referenced catalog differs from the live catalog only by marking Luna as multi-agent V2.
+# Regenerate the catalog after Codex upgrades because it is a static startup snapshot.
+model_catalog_json = "/home/jakub/.agents/model-catalog-v2.json"
+
+[features]
+collaboration_modes = false
+default_mode_request_user_input = true
+prevent_idle_sleep = true
+steer = false
+unified_exec = false
+
+[agents]
+default_subagent_model = "gpt-5.6-luna"
+default_subagent_reasoning_effort = "max"
+
+[tui]
+status_line = ["model-with-reasoning", "git-branch", "branch-changes", "run-state", "context-used", "five-hour-limit", "weekly-limit", "total-input-tokens", "total-output-tokens", "task-progress"]
+status_line_use_colors = true
+
+[tui.model_availability_nux]
+"gpt-5.5" = 4
+"gpt-5.6-sol" = 4
+
+[mcp_servers.openaiDeveloperDocs]
+url = "https://developers.openai.com/mcp"
+
+[plugins."personal-prompts@personal"]
+enabled = true
