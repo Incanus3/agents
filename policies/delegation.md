@@ -3,22 +3,47 @@
 This policy governs whether and how to delegate work, how to coordinate parallel work, and how to select delegated-agent
 models and reasoning effort.
 
-## Delegate with bounded ownership and evidence
+## Default to delegation for implementation and code verification
 
-Give delegated work a clear output, permitted actions, and acceptance criteria. Assign one owner to each writable
-artifact, and isolate concurrent work when changes could collide.
+Delegate implementation and code-verification work unless it is genuinely trivial. Treat work as trivial only when it
+is small, local, low-risk, reversible, requires no meaningful design judgment, and would cost more to explain and
+coordinate than to perform directly. Do not classify work as trivial merely because an experienced agent can complete
+it quickly.
 
-For consequential work, separate implementation from verification and retain artifact-based evidence of the result.
+Keep implementation and verification with the main agent only for these simplest tasks. Once a reviewed implementation
+plan provides clear scope, constraints, acceptance criteria, and file ownership, delegate its implementation and
+independent verification to separate agents selected according to the model and reasoning-effort rules below. The main
+agent remains responsible for integration, synthesis, unresolved decisions, and the final report.
+
+## Keep design ownership with the main agent
+
+Keep software design, architecture, trade-off resolution, specification writing, and implementation-plan synthesis
+with the main agent by default. Delegate bounded, preferably read-only exploration when independent repository
+discovery, external research, or comparison of alternatives would improve the design.
+
+Exploration workers return evidence and options; they do not silently become owners of the design. The main agent
+reconciles their findings, resolves conflicts, and confirms that the resulting plan has been reviewed and is ready
+before delegating implementation.
 
 ## Delegate only work with a bounded, verifiable contract
 
-Delegate when work is bounded, independently useful, explainable with compact context, and worth more than its
-coordination cost. Keep small, serial, or tightly coupled work with the coordinating agent.
+Delegate work in units that are bounded, independently useful, explainable with compact context, and worth their
+coordination cost. Keep tightly coupled tasks together when separating them would create ambiguous ownership or
+convoluted dependencies.
 
 For each delegated unit, state the desired output; acceptance criteria and evidence; relevant sources and constraints;
 allowed and forbidden actions; writable artifact scope; whether isolation is required; stop, budget, and escalation
 conditions; and who integrates and verifies the result. The coordinator remains responsible for synthesis unless that
 ownership is explicitly transferred.
+
+## Separate implementation from verification
+
+Never assign implementation and independent verification of the same change to the same subagent or agent session. A
+verifier must be a distinct agent that did not implement or materially assist with the change being verified.
+
+An implementation agent may run tests and self-checks while developing, but those checks do not count as independent
+verification. For consequential work, retain artifact-based evidence from both the implementer and the independent
+verifier.
 
 ## Coordinate parallel work deliberately
 
