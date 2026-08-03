@@ -191,41 +191,14 @@ variables.
 Keep related data and metadata together. Switching visible files without their associated metadata can leave management
 commands operating on a different logical state than the files currently in use.
 
-## Keep handoffs as concise, short-lived resume state
-
-Create or update a handoff at a clean, preferably verified checkpoint when work must pause or a context reset is
-approaching. A handoff contains only the operational delta a fresh session needs to continue unfinished work; it is not
-a durable source of truth or archive.
-
-When context-window risk appears to be increasing, warn the requester at a clean checkpoint rather than during a small
-edit or validation loop. State that the assessment is heuristic, recommend a handoff or fresh-session boundary, and
-offer a compact resume prompt or summary when useful.
-
-Before a reset, persist important learnings, decisions, caveats, and next actions in their canonical owners; create or
-suggest a handoff when it would make continuation safer.
-
-Include the objective; current status; current checkpoint and completed safety-relevant behavior; durable references
-and relevant task identifiers; latest verification evidence; ordered next actions; blockers, decisions, constraints,
-caveats, and temporary assumptions to re-check; and any failed attempt or environment caution needed to avoid
-repetition.
-
-When repository state materially affects continuation, record only the specific stable revision, bookmark, branch, or
-caveat needed to resume safely. Do not include a list or inventory of currently dirty files.
-
-Do not copy canonical documents, acceptance criteria, full logs, secrets, chat transcripts, or durable rationale and
-evidence. Persist those in their canonical owners first, then link to them from the handoff.
-
-When the workstream completes, capture any remaining durable information, update authoritative task state, and remove
-or archive the handoff when it is no longer needed. When a project maintains handoff indexes or resume commands, update
-the relevant index and return the project's copy-ready resume instruction.
-
 ## Close material work with durable state and evidence
 
 Before declaring material work complete, persist meaningful findings, decisions, and evidence in their canonical
 owners; update affected indexes or references; and record bounded follow-up work with enough context to resume.
 
-Record the verification performed and unresolved uncertainty. Update or remove a handoff when work pauses or completes,
-and summarize the outcome rather than the conversation.
+Record the verification performed and unresolved uncertainty. Use the handoff skill to maintain short-lived resume
+state at meaningful continuation checkpoints and to retire it when work completes. Summarize the outcome rather than
+the conversation.
 
 ## Prefer repository-aware version-control tooling
 
