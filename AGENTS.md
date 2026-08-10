@@ -117,6 +117,18 @@ Before deciding whether to delegate work, selecting a delegated-agent model, or 
 `~/.agents/policies/delegation.md` completely and apply it. Tool-specific skills govern execution mechanics but do not
 replace this policy.
 
+## Start approved implementation in a clean session
+
+When both the design specification and implementation plan are finalized and approved, treat that point as a clean
+session boundary by default. Before beginning implementation:
+
+1. Update the workstream handoff using the handoff skill.
+2. Encourage the operator to continue in a fresh session with the exact `$resume <slug>` command.
+3. After resumption, default to delegated execution using the subagent-driven-development skill unless the operator
+   explicitly chooses another approach.
+
+Do not begin implementation in the design-and-planning session unless the operator explicitly asks to continue there.
+
 ## Keep planning terminology out of product surfaces
 
 Production code, test names, user-facing documentation, command output, and APIs must remain independent of internal
