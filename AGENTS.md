@@ -150,6 +150,13 @@ variables.
 Keep related data and metadata together. Switching visible files without their associated metadata can leave management
 commands operating on a different logical state than the files currently in use.
 
+## Manage Beads through br
+
+Use `br` for all Beads issue and synchronization mutations. Never edit `.beads/issues.jsonl`, `.beads/*.db`, or related
+state files directly; treat the JSONL file as an exported version-control artifact. If a direct or external edit is
+discovered, reconcile the state through `br` and verify the affected issue with `br show` and the workspace with
+`br sync --status`.
+
 ## Close material work with durable state and evidence
 
 Before declaring material work complete, persist meaningful findings, decisions, and evidence in their canonical
