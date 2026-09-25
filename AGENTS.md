@@ -127,7 +127,13 @@ session boundary by default. Before beginning implementation:
 3. After resumption, default to delegated execution using the subagent-driven-development skill unless the operator
    explicitly chooses another approach.
 
+Prompt for the clean session only after the operator approves the implementation plan, once at that boundary.
+Do not recommend or require a new implementation session while plan approval is pending; reviewing, revising, or
+deferring an unapproved plan does not require that boundary. If an implementation session was already started for the
+plan, do not request a second clean session solely because approval was recorded there.
+
 Do not begin implementation in the design-and-planning session unless the operator explicitly asks to continue there.
+When they choose to continue, proceed in the current session without another clean-session prompt.
 
 ## Keep planning terminology out of product surfaces
 
@@ -163,8 +169,10 @@ Before declaring material work complete, persist meaningful findings, decisions,
 owners; update affected indexes or references; and record bounded follow-up work with enough context to resume.
 
 Record the verification performed and unresolved uncertainty. Use the handoff skill to maintain short-lived resume
-state at meaningful continuation checkpoints and to retire it when work completes. Summarize the outcome rather than
-the conversation.
+state at meaningful continuation checkpoints. Retire a workstream handoff only after the operator explicitly confirms
+that the workstream is complete. Passed checks, completed plan steps, closed tasks, commits, pushes, merge or deployment
+do not substitute for that confirmation. Until then, preserve the current baseline, remaining steps and gates, or the
+pending decision about what comes next. Summarize the outcome rather than the conversation.
 
 ## Prefer repository-aware version-control tooling
 
