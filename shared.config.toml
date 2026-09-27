@@ -1,6 +1,6 @@
 personality = "pragmatic"
-model = "gpt-5.6-sol"
-model_reasoning_effort = "medium"
+model = "gpt-6-sol"
+model_reasoning_effort = "high"
 approvals_reviewer = "auto_review"
 service_tier = "default"
 suppress_unstable_features_warning = true
@@ -10,27 +10,14 @@ suppress_unstable_features_warning = true
 # model_catalog_json = "/home/jakub/.agents/model-catalog-v2.json"
 
 [features]
-collaboration_modes = false
-default_mode_request_user_input = true
 prevent_idle_sleep = true
-steer = false
-unified_exec = false
+default_mode_request_user_input = true
 context_management.experimental_mode = true
 
 [agents]
-default_subagent_model = "gpt-5.6-luna"
-default_subagent_reasoning_effort = "max"
+default_subagent_model = "gpt-6-sol"
+default_subagent_reasoning_effort = "medium"
 
 [tui]
 status_line = ["model-with-reasoning", "git-branch", "branch-changes", "run-state", "context-used", "five-hour-limit", "weekly-limit", "total-input-tokens", "total-output-tokens", "task-progress"]
 status_line_use_colors = true
-
-[tui.model_availability_nux]
-"gpt-5.5" = 4
-"gpt-5.6-sol" = 4
-
-[mcp_servers.openaiDeveloperDocs]
-url = "https://developers.openai.com/mcp"
-
-[plugins."personal-prompts@personal"]
-enabled = true

@@ -3,16 +3,19 @@
 This policy governs whether and how to delegate work, how to coordinate parallel work, and how to select delegated-agent
 models and reasoning effort.
 
-## Use premium model configurations selectively
+## Use model families according to the work
 
-Never use `gpt-6-astra` as a subagent. Never use `gpt-5.6-sol` with reasoning effort above `high`
-as a subagent. These planning-tier configurations are reserved for planning work performed by the
-primary agent, not delegated implementation, exploration, or verification.
+Never use an `astra` model as a subagent. Never use a `sol` model with reasoning effort above `high`
+as a subagent. For primary-agent planning and design, prefer `sol` at `high`, and use `xhigh` when
+the work warrants deeper reasoning. Use `astra` for demanding primary-agent work; reasoning effort
+above `low` is very expensive and needs a clear expected benefit.
 
-Use `gpt-5.6-sol` with `high` reasoning effort only for the most complex or mission-critical
-delegated tasks, primarily independent verification where the additional capability justifies its
-high cost. Prefer less expensive model and reasoning-effort configurations for implementation,
-exploration, and routine verification.
+Use an available `sol` model at `medium` or `high` for substantive delegated work. Choose `high`
+for the most complex or mission-critical tasks, especially independent verification. Use an
+available `luna` model at `max` for routine implementation, exploration, and verification. Avoid
+`sol` at `low` and `luna` below `max`; these configurations are not preferred workhorse choices.
+For eligible subagents, follow an explicit operator model choice when the selected model is
+available and permitted by the execution environment.
 
 ## Default to delegation for implementation and code verification
 
