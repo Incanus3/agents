@@ -17,8 +17,14 @@ unimportant. Scale the structure to the design; do not add empty sections or unn
   “Retry strategy” when the section establishes that contract.
 - Put conclusions and requirements before supporting explanation. Keep related evidence, rationale, and consequences
   close to the claim or decision they support.
+- Restructure existing content before adding content. Integrate missing rationale into the relevant contract instead
+  of appending an explanation that repeats it. A heading or first requirement can supply the section's conclusion;
+  do not add a bold summary sentence that says the same thing.
 - Remove glue text, repeated summaries, generic introductions, promotional language, and narration of the design
   process. Retain reasoning that affects a decision or explains a constraint.
+- Give each contract and rationale one authoritative location. Keep inventories and approval questions concise and
+  link to that location; use scenarios and diagrams to expose behavior or relationships rather than retelling the
+  full contract. Information already present may satisfy several policy requirements in the same passage.
 - Preserve whitespace and readable sentences. Information density is useful information per unit of attention, not
   the fewest possible lines or words.
 - Choose the format that fits the information: tables for comparison, lists for parallel items or steps, short prose
@@ -27,9 +33,14 @@ unimportant. Scale the structure to the design; do not add empty sections or unn
 
 ## Provide a decision inventory
 
-Near the beginning, list every design decision with a stable identifier, status immediately after the identifier,
-proposal or inherited choice, concrete downside, and link to its rationale. Do not present recommendations as already
-accepted.
+Near the beginning, list every decision made or reconsidered in the current design with a stable identifier, status
+immediately after the identifier, proposal or choice, concrete downside, and link to its rationale. Do not present
+recommendations as already accepted. Keep inherited constraints explicit in a compact section with authoritative
+sources; give them decision entries only when their application introduces a choice in the current design.
+
+Record choices as decisions; attach consequences, constraints, and derived behavior to their owning choices rather
+than creating separate decisions or rationale treatments for each. Preserve independently selectable trade-offs as
+distinct decisions. Do not discard details or change established IDs/statuses merely to consolidate presentation.
 
 | ID | Status | Decision or proposal | Downside or constraint | Rationale |
 |---|---|---|---|---|
@@ -49,8 +60,8 @@ than a separate status; record the source and its established acceptance. Use na
 D2 before D10), and preserve identifiers when sorting rather than renumbering decisions.
 
 The row above illustrates the format, not a required retry policy. Populate inventories with actual decisions and
-working links. Include inherited decisions and their authoritative sources, especially where they constrain the new
-design. Keep unresolved choices visible rather than silently selecting an option.
+working links. Keep unresolved choices visible rather than silently selecting an option. Apply inventory ordering and
+identifier rules without adding explanations of those policy mechanics to the specification.
 
 ## Use a consistent decision structure
 
@@ -61,11 +72,14 @@ For each decision, make the following information easy to find:
 3. **Recommendation:** the proposed choice and its rationale, including where it loses to an alternative.
 4. **Consequences:** benefits and concrete costs, including complexity, operational burden, compatibility effects,
    failure modes, recovery limitations, and reversibility where applicable.
-5. **Revisit conditions:** evidence or changed constraints that would justify reconsidering the decision.
+5. **Revisit conditions, where useful:** concrete evidence or changed constraints that would justify reconsidering
+   the decision. Omit generic statements such as “revisit if the operator changes the requirement.”
 
-Use compact entries for simple decisions and more explanation where necessary. Do not invent alternatives or trade-offs
-to fill a template. State when constraints leave only one feasible option. Avoid vague costs such as “some additional
-complexity”; identify the added component, responsibility, dependency, or behavior.
+These are information to cover, not a template to instantiate for every decision. A compact paragraph, table, or
+existing contract section may cover several items together; do not create separate repeated treatments to satisfy
+each one. Use compact entries for simple decisions and more explanation where necessary. Do not invent alternatives
+or trade-offs to fill a template. State when constraints leave only one feasible option. Avoid vague costs such as
+“some additional complexity”; identify the added component, responsibility, dependency, or behavior.
 
 ## Separate evidence from judgment
 
@@ -83,6 +97,21 @@ confidence labels. Distinguish source statements from inferences. Identify uncer
 risk, feasibility, or blast radius; do not disguise it as a settled requirement.
 
 ## Show behavior with concrete scenarios
+
+When information appears in several representations, each must serve a distinct review purpose:
+
+| Representation | Review purpose |
+|---|---|
+| Decision inventory | Identify choices and their current status |
+| Scenarios | Show observable behavior in concrete situations |
+| Diagrams | Reveal paths, interactions, or relationships |
+| Contracts | Specify exact requirements and semantics |
+| Acceptance criteria | Define evidence that establishes compliance |
+| Approval questions | Identify trade-offs requiring operator judgment |
+
+These purposes are checks, not a requirement to create six separate sections or repeat each decision six times.
+Retain overlap that supports a distinct purpose or necessary local context. If a representation merely paraphrases
+nearby text, consolidate or remove one treatment while preserving all information and useful navigation.
 
 Present observable behavior before implementation mechanics. Use concise examples or scenario tables covering normal
 operation, boundary cases, and failures. Include exact inputs, outputs, errors, and state changes where they define the
@@ -117,6 +146,9 @@ already clear in text.
 - Mark replaced decisions as superseded and preserve useful rationale in the canonical decision record. Keep the
   current specification authoritative; do not maintain conflicting versions of the design.
 - Do not silently carry approval across changes that invalidate its basis. Make the affected approval scope explicit.
+- When an editorial revision increases the word count, check what new information or useful representation accounts
+  for the increase. Remove duplication and template overhead; retain additions that supply missing requirements,
+  evidence, rationale, or clearer behavior. Do not impose a length cap or delete details merely to reduce the count.
 
 ## Prepare review evidence and explicit approval questions
 
@@ -125,11 +157,28 @@ behavior and API contracts, check sources, identify missing cases, and remove co
 relevant verification evidence and remaining uncertainty. Do not leave avoidable investigation for the operator or
 claim verification that has not been performed.
 
+Attach evidence and uncertainty to their owning claims; a separate evidence summary should add useful verification
+context or provide concise links rather than repeat those claims.
+
 Agents can establish evidence and check consistency; these checks do not establish operator intent or acceptance of
 trade-offs. End with explicit questions requiring operator judgment, linked to the corresponding decisions. Prefer
 “Accept delayed failure detection in exchange for automatic recovery?” to “Does this design look good?” State what
 approval would cover and preserve unresolved choices as unresolved. Silence is not approval, and technical readiness
 does not authorize consequential actions.
+
+Define approval scope and authorization boundaries in one authoritative location. Elsewhere, use concise references
+or reminders only where needed to prevent misunderstanding, rather than repeating the complete gate sequence.
+
+Before presenting the completed document, perform a consolidation pass across sections:
+
+- Check whether repeated statements supply necessary local context or a distinct review function; replace repetition
+  with a short reference when that preserves the function.
+- Bring unnecessarily scattered rationale and consequences together at their owning decision or contract.
+- Recheck completeness, approval scope, and consistency of contracts, scenarios, diagrams, and acceptance criteria
+  after consolidation. Preserve useful representations; do not reduce length at their expense.
+
+Apply this check to the artifact itself, not just the writing process. Do not add a consolidation report or checklist
+to the specification unless it supplies needed review evidence.
 
 ## Background references
 
