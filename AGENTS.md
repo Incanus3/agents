@@ -35,6 +35,13 @@ Include the context needed to resume safely:
 
 Before finalizing a specification, remove placeholders and resolve contradictions or ambiguous requirements.
 
+## Make design specifications easy to review
+
+Before writing, revising, or preparing a design specification for review, read
+[the design-specification writing policy](policies/design-spec-writing.md) at
+`~/.agents/policies/design-spec-writing.md` completely and apply it. Preserve self-contained design context while making
+decisions, evidence, trade-offs, and approval scope easy to inspect.
+
 ## Read design context before executing plans
 
 Before implementing from a plan, read the complete design specification referenced by that plan. Use the design to
