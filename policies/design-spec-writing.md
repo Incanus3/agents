@@ -137,6 +137,20 @@ Keep diagrams consistent with the written contract and update both when behavior
 exact API or error semantics from a diagram alone. Avoid decorative diagrams for a single fact or a simple sequence
 already clear in text.
 
+## Add an HTML review companion when it improves understanding
+
+Use an HTML companion when a design's relationships, flows, states or comparisons benefit from a coordinated layout
+beyond the Markdown specification and its diagrams. Choose the representation from the reviewer questions; do not
+require a companion for every specification or reproduce a fixed set of sections.
+
+Use the [design-visualization skill](../skillsets/personal/skills/design-visualization/SKILL.md) for generation and
+verification. Reuse its familiar presentation conventions while adapting the explanatory content to the design.
+Keep headings descriptive and significant costs, failures and uncertainty visible without interaction.
+
+The Markdown specification remains authoritative and self-contained. A companion links to its source and revision,
+preserves decision statuses and behavioral boundaries, and is updated with the source or marked as a stale snapshot.
+Inspect rendered layout and source fidelity before delivery. Local artifact creation does not authorize publication.
+
 ## Make revisions reviewable
 
 - Preserve stable section and decision identifiers so comments and links remain useful.
