@@ -1,7 +1,7 @@
 # Design specification visualizations
 
 - Status: active
-- Updated: 2026-10-03
+- Updated: 2026-10-05
 - Resume: `$resume design-spec-visualizations`
 
 ## Objective and authorization
@@ -97,8 +97,27 @@ history before further repository work. Both targets were refreshed with `but pu
 Fresh checks: visualization quick_validate passes, skillset doctor clean, five changed shell scripts pass `bash -n`,
 and changed JSON/TOML parse. Earlier workflow updates were preserved rather than redesigned: executing-plans and
 subagent-driven-development still refer to the removed finishing-a-development-branch skill. This known reference
-gap needs separate follow-up; no end-to-end behavioral validation of those earlier workflow changes was performed.
+gap is an operator-accepted consequence of excluding unwanted upstream skills. Do not patch the obra set after
+each update solely to eliminate failed skill reads. No end-to-end behavioral validation of those earlier workflow
+changes was performed.
 Use skillset-cli for personal collection/discovery management, not ad hoc links or direct lock metadata edits.
 The old Caddy Orca worker is unrelated to these native subagent trials; re-list before using it if requested later.
 
 Latest refinement: operator requested main page titles at ~two-thirds size. Shared CSS now uses clamp(24px,3.133vw,42.667px), synchronized delivery/rotation/reference previews; revised C inline scale and mobile override reduced proportionately. Catalog browser cached old CSS initially; cache-busted stylesheet load confirmed 42.667px and no overflow. Title scale is now part of canonical shared asset.
+
+Machine-string refinement: shared review CSS and the Caddy review companion now distinguish inline code with a
+neutral background/border, brighter monospace text and .94em sizing. Pattern guidance requires semantic code markup
+for literals. Desktop1454 and a 390px-wide browser frame inspected; long paths wrap without page overflow, block
+padding remains12px, and review/source HTML bytes are unchanged. Skill CSS/guidance landed on skillsets origin/main at cdd843ba69ae6e14644ce24e377e9f84a0e4d243;
+remote SHA and clean workspace verified. Caddy companion CSS committed locally at bda83c17, without landing.
+The Taskman mix precommit gate could not run its tests: PostgreSQL at localhost:5432 refused connections.
+Browser visual checks and unchanged-source/whitespace checks passed; no application behavior changed.
+
+Current viewport scope: operator rejected routine small-viewport work as unnecessary generation overhead. Policy,
+skill and pattern guidance now default to desktop rendering/inspection only. Responsive adaptation and narrow checks
+require an explicit operator request; existing CSS remains usable without creating a verification obligation. Skill
+quick_validate passes. Skill guidance is landed on skillsets origin/main at
+3839181389a9210be283876da1ef89b3a9b2f770; remote SHA and clean workspace verified after refresh. The operator
+authorized landing the remaining policy and handoff checkpoint in .agents. Resume from current target history.
+The policy also clarifies that substantive companion findings must first be corrected in the authoritative spec,
+then synchronized with snapshots/provenance; presentation-only edits remain in the companion.

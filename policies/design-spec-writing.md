@@ -149,7 +149,15 @@ Keep headings descriptive and significant costs, failures and uncertainty visibl
 
 The Markdown specification remains authoritative and self-contained. A companion links to its source and revision,
 preserves decision statuses and behavioral boundaries, and is updated with the source or marked as a stale snapshot.
-Inspect rendered layout and source fidelity before delivery. Local artifact creation does not authorize publication.
+Inspect rendered layout and source fidelity before delivery. Desktop review is the default; responsive adaptations and
+small-viewport checks are required only when the operator explicitly requests them. Local artifact creation does not
+authorize publication.
+
+When reviewing or refining a companion reveals an ambiguity, error or missing explanation also present in the
+Markdown specification, correct the authoritative specification first, then synchronize the companion and any
+source snapshots and revision/hash provenance in the same change. Keep presentation-only edits in the companion;
+do not copy them into the specification. Do not introduce behavioral contracts or decision/approval statuses
+through the companion alone; apply the specification's normal revision and approval rules.
 
 ## Make revisions reviewable
 
