@@ -1,7 +1,7 @@
 # Design specification visualizations
 
 - Status: active
-- Updated: 2026-10-05
+- Updated: 2026-10-06
 - Resume: `$resume design-spec-visualizations`
 
 ## Objective and authorization
@@ -121,3 +121,91 @@ quick_validate passes. Skill guidance is landed on skillsets origin/main at
 authorized landing the remaining policy and handoff checkpoint in .agents. Resume from current target history.
 The policy also clarifies that substantive companion findings must first be corrected in the authoritative spec,
 then synchronized with snapshots/provenance; presentation-only edits remain in the companion.
+
+Existing-skill discovery checkpoint (2026-10-06): source audit and pinned upstream revisions are recorded in
+`/home/jakub/.local/share/caddy-design-views/2026-10-03/existing-skills-comparison.md`. Keep our review contract and
+presentation shell; diagram-design offers the richest diagram references, effective-html's html-diagram the lightest
+specialist. Other candidates add conflicting defaults or serve only as renderers. No candidate was installed, executed
+or benchmarked during that source audit. The subsequent operator-approved generation trial is complete below;
+no canonical policy/skill changes are authorized by the experiment. This handoff addition remains local and uncommitted.
+
+Two-skill generation trial (2026-10-06): two independent sol/high authors used our framework plus pinned
+diagram-design or effective-html's html-diagram. Outputs, same fresh source, provenance and independent assessment:
+`/home/jakub/.local/share/caddy-design-views/2026-10-03/skill-comparison-2026-10-06/index.html` and `assessment.md`.
+Main signpost links both. Operator prefers diagram-design's styling/readability; html-diagram was too detailed and
+diagram-heavy. This supersedes the coordinator's initial html-diagram preference as the operator-fit judgment.
+Both preserve statuses and important reviewed boundaries; independent
+1440×1080 renders and 62 links/23 decision rows per page pass. One label/routing correction per candidate verified.
+No mobile, native behavior or human-review-time testing. Older C uses a different snapshot. Upstream skills were
+read from temporary pinned archives, not globally installed or modified. Loopback preview is port 41637, local only.
+Second operator-authorized trial is complete: Taskman's named-host/repository-binding draft, at
+`/home/jakub/.local/share/caddy-design-views/2026-10-03/repository-bindings-comparison-2026-10-06/index.html`.
+Both fresh authors received the Caddy feedback; each selected one ownership diagram and kept exact rules in tables.
+Coordinator prefers diagram-design's larger labels/clear routes; html-diagram improved substantially. All ten source
+decision IDs/statuses/order and local links pass; independent 1440×1080 renders have no overflow/remote dependencies.
+Source remains an unapproved draft: D1 accepted, D2–D10 proposed; unresolved behavior was not finalized.
+One connector/label overlap and one proposed-schema wording issue were corrected and independently checked.
+Main signpost now lists both designs. `assessment.md` and author notes own detailed evidence and limitations.
+Operator slightly prefers html-diagram for the second pair and considers both good, with possible run variance.
+Next gate: operator assesses the final repeat before adoption/policy refinement. No canonical skills/policies or source
+specs were changed, and no upstream skills were globally installed. Preserve capability baseline/external-action gates.
+
+Third operator-authorized comparison is complete: Taskman's Immediate Cooperative Workspace Updates design at
+`/home/jakub/.local/share/caddy-design-views/2026-10-03/live-updates-comparison-2026-10-06/index.html`.
+Fresh sol/high authors used the same unchanged approved source and pinned upstream revisions. Diagram-design chose
+an explicit database sequence plus conflict state graph; html-diagram chose a compact sequence, conditional rows
+and before/after draft comparison. Coordinator slightly prefers html-diagram; operator slightly prefers diagram-design and its maintenance evidence.
+Both preserve outer-transaction rollback-after-invalidation limitation, source authority and dated assumptions.
+Independent 1440×1080 renders and 30/35 local/source links pass; no overflow/remote assets; snapshot still equals repo.
+Detailed assessment, provenance and verification are owned by that experiment directory. Main gallery links all three.
+Maintenance audit is `maintenance-comparison-2026-10-06.md` in the gallery root: diagram-design has stronger adoption,
+activity and CI/toolkit evidence; effective-html is smaller/maintainer-led with recent maintenance, not abandoned.
+Both are young and lack observed tagged releases. Maintenance does not establish rendered-output superiority.
+Different-source trials do not isolate run variance; repeating one case would. No source, canonical skills or policies
+changed; no upstream installations, commits, landing or publication performed. Local handoff changes remain uncommitted.
+Current primary Orca preview page: `0fe78855-676e-4369-a20a-8fcdee07afbd`; loopback port 41637.
+
+Final comparison delivered (2026-10-06): fresh sol/high authors repeated the SAME cooperative-updates snapshot and
+pinned upstream revisions, without earlier outputs/rankings. Artifacts and independent assessment:
+`/home/jakub/.local/share/caddy-design-views/2026-10-03/live-updates-repeat-2026-10-06/index.html` and `assessment.md`.
+Diagram-design selected one participant sequence and tables; html-diagram selected ownership/operation flows and
+field comparison tables. Both became longer than their first runs. Coordinator slightly prefers diagram-design for
+participant interactions; neither repeat is an unqualified improvement over the first. Operator assessment is pending.
+Independent source, 28/26 local/source links, CSS equality and 1440×1080 renders pass; no overflow/remote assets.
+One generic no-change label and satisfied-field exception were clarified in html-diagram and independently checked.
+Source is unchanged and matches first run/current repo. Main gallery links the final pair and first run.
+Brief wording differed slightly, so this qualitative repeat is not a statistical or skill-only causal benchmark.
+Operator requested this as the last trial: stop experiments, await final assessment and any explicit adoption decision.
+No source or canonical skill/policy changes, installation, commits, landing or publication. Local handoff stays active.
+
+Adoption checkpoint (2026-10-06): operator approved diagram-design as the default specialist. Installed unmodified via
+`skillset skills add` into the managed always-on collection (already globally Codex-enabled); restored active set
+always-on-m. The collection lock records source cathrynlavery/diagram-design and folder hash
+`dc9745b0be384e9a9ff9b9dac08d8d609f7c2154`. The personal design-visualization skill now routes applicable diagrams to it,
+keeps our presentation/authority/desktop constraints, skips repeated already-resolved onboarding/type prompts and
+preserves suitable diagram types/participant positions on revisions. Proper relationships are drawn explicitly;
+ordinary tables remain appropriate for comparison/contracts. Upstream files were not customized.
+Skill quick_validate and skillset doctor pass; installed references/resources and global discovery checked.
+Default adoption is complete locally. Remaining gate: commit/landing if requested; this checkpoint is uncommitted.
+No further experiments are needed. Workstream remains active pending operator confirmation of completion.
+
+Landing checkpoint (2026-10-06): operator authorized stopping the preview server and committing/landing skillsets.
+Loopback server on port 41637 stopped; archived HTML artifacts remain on disk. Skillsets origin/main landed at
+`0d81a44c57d0efd7e25e16513f839a38594a5e12`; remote SHA equals local target and workspace is clean. quick_validate and skillset doctor pass.
+This supersedes the adoption checkpoint’s uncommitted skillsets gate. The .agents handoff edits remain local;
+workstream remains active pending explicit completion confirmation.
+
+Optional syntax highlighting checkpoint (2026-10-07): operator approved CDN-based Highlight.js with plain-code offline
+fallback. Updated personal design-visualization SKILL.md, shell.html, review.css, reference.html and visual-patterns.md.
+Shell/reference use asynchronous Highlight.js 11.12.0 from cdnjs, pinned SRI; local CSS provides token colors. Only
+explicit supported language classes on pre/code blocks are highlighted; unknown/unlabeled blocks and inline literals
+stay unchanged. No grammar auto-downloads or loading UI. Generated companions without relevant code omit the script.
+Independent local Chromium1440 checks: live CDN produces tokens; blocked CDN and JavaScript-disabled views keep
+identical code text/padding and no overflow/page errors; unsupported/unlabeled blocks stay plain. Render inspected;
+quick_validate and skillset doctor pass. Changed guidance and assets are local/uncommitted; no landing authorized yet.
+No existing design companions or upstream diagram-design files changed. Pending operator assessment/commit gate.
+
+Highlighting verification scope clarified (2026-10-07): operator explicitly rejects repeated offline verification during
+companion generation. Skill now states fallback was verified during development; ordinary generation inspects rendering
+without offline/CDN-blocking/no-JS tests, availability probes or local fallback installs. Recheck only when loader or
+fallback behavior changes. Guidance-only clarification; skill validation passes, integration tests were not repeated.
