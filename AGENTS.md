@@ -81,6 +81,9 @@ Keep the operator in control of priorities, scope expansion, irreversible or ext
 experimental practice into canonical guidance. Escalate uncertainty that materially changes intent, risk, or blast
 radius rather than silently choosing on the operator's behalf.
 
+When stopping, state the next concrete step, the decision it requires, and the consequences of
+each available choice. Distinguish design approval from implementation and external-action approval.
+
 ## Separate technical readiness from authorization
 
 Completion, verification, committing, pushing, or other evidence of technical readiness does not authorize a
@@ -163,23 +166,32 @@ variables.
 Keep related data and metadata together. Switching visible files without their associated metadata can leave management
 commands operating on a different logical state than the files currently in use.
 
-## Manage Beads through br
+## Apply the task-tracking policy
 
-Use `br` for all Beads issue and synchronization mutations. Never edit `.beads/issues.jsonl`, `.beads/*.db`, or related
-state files directly; treat the JSONL file as an exported version-control artifact. If a direct or external edit is
-discovered, reconcile the state through `br` and verify the affected issue with `br show` and the workspace with
-`br sync --status`.
+Before working with task trackers, read
+[the task-tracking policy](policies/task-tracking.md) at
+`~/.agents/policies/task-tracking.md` completely and apply it. It owns tracker selection,
+task creation and grouping, List placement, lifecycle authority, and tracker-specific safeguards.
 
 ## Close material work with durable state and evidence
 
 Before declaring material work complete, persist meaningful findings, decisions, and evidence in their canonical
 owners; update affected indexes or references; and record bounded follow-up work with enough context to resume.
 
-Record the verification performed and unresolved uncertainty. Use the handoff skill to maintain short-lived resume
-state at meaningful continuation checkpoints. Retire a workstream handoff only after the operator explicitly confirms
-that the workstream is complete. Passed checks, completed plan steps, closed tasks, commits, pushes, merge or deployment
-do not substitute for that confirmation. Until then, preserve the current baseline, remaining steps and gates, or the
-pending decision about what comes next. Summarize the outcome rather than the conversation.
+Record the verification performed and unresolved uncertainty. Before creating, refreshing, shortening or retiring
+a workstream handoff, read [the handoff policy](policies/handoffs.md) at
+`~/.agents/policies/handoffs.md` completely and apply it. Use the handoff skill for execution mechanics; the policy owns
+continuation preservation, ruling records and retirement gates. Summarize the outcome rather than the conversation.
+
+## Commit verified work and keep publication separate
+
+Commit verified work after each bounded task or material checkpoint. This grants standing
+authorization for local commits; pushing, merging, deployment and history rewriting retain their
+separate authorization gates.
+
+Keep review corrections local and batch pushes until the operator requests one or confirms review
+completion. Review completion alone does not authorize pushing: act only under an explicit push
+request or previously granted authorization whose conditions are now satisfied.
 
 ## Prefer repository-aware version-control tooling
 
